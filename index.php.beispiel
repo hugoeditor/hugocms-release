@@ -10,8 +10,8 @@
  *      oder programmatisch. Pfade möglichst AUSSERHALB des Web-Wurzelver-
  *      zeichnisses.
  *
- * Erwartete Paketstruktur (Document-Root = hugocms/):
- *   hugocms/
+ * Erwartete Paketstruktur (Document-Root = Paketwurzel):
+ *   ./
  *   ├── edit/                (Client; erreichbar unter /edit/)
  *   ├── backend/             (PHP-Quellen)
  *   ├── log/
