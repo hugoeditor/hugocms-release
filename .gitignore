@@ -1,0 +1,2 @@
+# Hugo-Binary (wird per bin/get-hugo.sh geholt, nicht versioniert)
+bin/hugo/
