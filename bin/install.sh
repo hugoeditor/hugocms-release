@@ -14,7 +14,9 @@
 # Wirkung:
 #   1. Erzeugt — falls noch nicht vorhanden — die host-spezifische Mount-Datei
 #        backend/mounts/<hash>.ini   (Hash wie scripts/site-hash.sh)
-#      aus der Vorlage mounts.ini.beispiel. Die Mount-Pfade darin anpassen.
+#      mit Hugo-Struktur: content/, layouts/ und static/ im Hugo-Projekt-
+#      verzeichnis (Elternverzeichnis des Publish-Ordners). Pfade bei Bedarf
+#      anpassen.
 #   2. Richtet den Publish-Ordner ein:
 #        edit/             -> <packaging>/app       (Symlink; Frontend, URL /edit/)
 #        cms-api/          (echtes Verzeichnis;     API-Endpunkt, URL /cms-api/)
@@ -41,7 +43,6 @@ APP_DIR="$PKG_ROOT/app"
 BACKEND_DIR="$PKG_ROOT/backend"
 ENTRY="$PKG_ROOT/index.php"   # Release-Einstiegspunkt (wird nach cms-api/ kopiert)
 MOUNTS_DIR="$BACKEND_DIR/mounts"
-TEMPLATE="$BACKEND_DIR/mounts.ini.beispiel"
 
 # --- Parameter prüfen ------------------------------------------------------
 if [ "$#" -ne 2 ]; then
@@ -94,24 +95,49 @@ if [ ! -x "$SCRIPT_DIR/hugo/hugo" ]; then
     echo ""
 fi
 
-# --- 1. Host-spezifische Mount-Datei ---------------------------------------
+# --- 1. Host-spezifische Mount-Datei (Hugo-Struktur) -----------------------
 # Site-Kennung = Host + Endpunkt-Pfad; Hash identisch zu backend/core/SiteKey.php.
 SITE_KEY="${HOST}/${API_DIR}"
 HASH="$(printf '%s' "$SITE_KEY" | sha256sum | cut -d' ' -f1)"
 MOUNT_FILE="$MOUNTS_DIR/${HASH}.ini"
 
+# Hugo-Projektverzeichnis = Elternverzeichnis des Publish-Ordners; dort liegen
+# content/, layouts/ und static/. ABSOLUTE Pfade verwenden — relative Pfade in
+# der Mount-Datei gälten sonst relativ zu backend/mounts/, nicht zum Projekt.
+HUGO_ROOT="$(dirname "$PUBLISH_ABS")"
+
 mkdir -p "$MOUNTS_DIR"
-echo "1. Mount-Konfiguration"
+echo "1. Mount-Konfiguration (Hugo-Projekt: $HUGO_ROOT)"
 echo "   Site-Kennung: $SITE_KEY"
 echo "   Datei:        $MOUNT_FILE"
 if [ -e "$MOUNT_FILE" ]; then
     echo "   → existiert bereits, bleibt unverändert."
-elif [ -f "$TEMPLATE" ]; then
-    cp "$TEMPLATE" "$MOUNT_FILE"
-    echo "   → aus Vorlage erzeugt. Bitte die Mount-Pfade in der Datei anpassen."
 else
-    printf '; HugoCMS – Mounts für %s\n; (Vorlage mounts.ini.beispiel fehlte — Mounts ergänzen.)\n' "$HOST" > "$MOUNT_FILE"
-    echo "   → leere Datei erzeugt (Vorlage fehlte). Mounts ergänzen."
+    # Mount-Zielverzeichnisse sicherstellen — das Backend verweigert Mounts
+    # auf nicht existierende Verzeichnisse.
+    mkdir -p "$HUGO_ROOT/content" "$HUGO_ROOT/layouts" "$HUGO_ROOT/static"
+    cat > "$MOUNT_FILE" <<EOF
+; HugoCMS – Mounts für $HOST (von install.sh erzeugt).
+; Hugo-Projektstruktur im Elternverzeichnis des Publish-Ordners.
+; Absolute Pfade; bei Bedarf anpassen.
+
+[content]
+path = $HUGO_ROOT/content
+label = Inhalt
+accept = md, markdown, html, htm, png, jpg, jpeg, gif, webp, svg
+
+[layouts]
+path = $HUGO_ROOT/layouts
+label = Vorlagen
+permissions = read, write
+
+[static]
+path = $HUGO_ROOT/static
+label = Medien
+EOF
+    echo "   → erzeugt:  content -> $HUGO_ROOT/content"
+    echo "               layouts -> $HUGO_ROOT/layouts"
+    echo "               static  -> $HUGO_ROOT/static"
 fi
 echo ""
 
