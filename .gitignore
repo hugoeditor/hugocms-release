@@ -1,2 +1,9 @@
 # Hugo-Binary (wird per bin/get-hugo.sh geholt, nicht versioniert)
 bin/hugo/
+
+# Instanzkonfiguration darf nicht ins Release-Repo gelangen. Die Vorlagen
+# enden auf *.ini.beispiel und bleiben damit versioniert. Schutz zusätzlich
+# zum Packaging (scripts/packaging.sh, Schritt 4b), falls hier eine Installation
+# läuft oder das Skript einmal aussetzt.
+*.ini
+*.bak
