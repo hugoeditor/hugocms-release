@@ -19,8 +19,9 @@
  *          mit Rückfall auf mounts.ini (mit Hinweis). Den Hash bildet SiteKey
  *          aus Host + Endpunkt-Pfad — so verwaltet eine Installation mehrere
  *          Webseiten. Fehlt beides, wird die Seite als unbekannt gemeldet (404).
- *   3. Fehlt die hugocms.ini, wird ein Einrichtungsfehler an den Client
- *      gemeldet. (Ein Einrichtungs-Setup, das die Dateien erzeugt, folgt.)
+ *   3. Fehlt die hugocms.ini, übernimmt das Einrichtungs-Setup (Setup): Es
+ *      zeigt dem Anwender ein Setup-Formular und erzeugt daraus die
+ *      hugocms.ini.
  */
 
 declare(strict_types=1);
@@ -30,6 +31,7 @@ require __DIR__ . '/autoload.php';
 use HugoCMS\FileManager\Connector;
 use HugoCMS\FileManager\Exception\ApiException;
 use HugoCMS\FileManager\Response;
+use HugoCMS\FileManager\Setup;
 use HugoCMS\FileManager\SiteKey;
 
 // Konfiguration liegt im übergeordneten backend/-Verzeichnis.
@@ -51,7 +53,7 @@ if (is_file($configFile)) {
         $connector = new Connector(['config' => $configFile]);
     } catch (ApiException $e) {
         // Konfigurationsfehler vor dem Aufbau des Connectors sauber melden.
-        Response::error($e->errorCode(), $e->getMessage(), $e->httpStatus());
+        Response::fromException($e);
     }
 
     // Mounts host-spezifisch laden: Die aufgerufene Webseite bestimmt über
@@ -65,8 +67,8 @@ if (is_file($configFile)) {
     if (is_file($hostMounts)) {
         $connector->mountsFromFile($hostMounts);
     } elseif (is_file($mountsFile)) {
-        // Kurzer Hinweis an den Client, ausführlicher Kontext ins Log.
-        $connector->addSetupWarning(sprintf('Keine eigene Mount-Konfiguration für „%s".', $siteKey));
+        // Kurzer Hinweis an den Client (übersetzbar), ausführlicher Kontext ins Log.
+        $connector->addSetupWarning('MOUNT-CONFIG-MISSING', [$siteKey]);
         $connector->logWarning(sprintf(
             'Keine eigene Mount-Konfiguration für „%s" (erwartet: mounts/%s.ini). '
             . 'Es gilt der Rückfall mounts.ini.',
@@ -75,26 +77,15 @@ if (is_file($configFile)) {
         ));
         $connector->mountsFromFile($mountsFile);
     } else {
-        Response::error(
-            'ESITE',
-            sprintf(
-                'Unbekannte Webseite „%s": weder mounts/%s.ini noch der Rückfall '
-                . 'mounts.ini vorhanden. Die Einrichtung folgt.',
-                $siteKey,
-                $hash,
-            ),
-            404,
-        );
+        Response::error('ESITE', null, 404, [$siteKey, $hash]);
     }
 
     $connector->run();
     return;
 }
 
-// 3. Keine Konfiguration vorhanden — die Einrichtung steht noch aus.
-Response::error(
-    'ESETUP',
-    'HugoCMS ist noch nicht eingerichtet: weder custom.php noch hugocms.ini gefunden. '
-    . 'Das Einrichtungs-Setup folgt.',
-    503,
-);
+// 3. Keine Konfiguration vorhanden — das Einrichtungs-Setup übernimmt. Es
+//    beantwortet whoami (setupRequired) und den Befehl setup, der die
+//    hugocms.ini erzeugt und den Benutzer direkt anmeldet. Danach greift beim
+//    nächsten Aufruf der normale Pfad (Schritt 2).
+Setup::handle($backendDir);
