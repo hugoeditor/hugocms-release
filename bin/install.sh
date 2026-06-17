@@ -155,16 +155,37 @@ permissions = read, write
 path = $HUGO_ROOT/static
 label = Medien
 
-; Hugo-Aufruf für den Veröffentlichen-Knopf (Befehl "build").
+; Hugo-Aufruf für den Veröffentlichen-Knopf (Befehl "build"). Das Hugo-
+; Programm (bin) steht zentral in der hugocms.ini, nicht hier.
 [hugo]
-bin = $SCRIPT_DIR/hugo/hugo
 source = $HUGO_ROOT
 destination = $PUBLISH_ABS
 EOF
     echo "   → erzeugt:  content -> $HUGO_ROOT/content"
     echo "               layouts -> $HUGO_ROOT/layouts"
     echo "               static  -> $HUGO_ROOT/static"
-    echo "               [hugo]  -> $SCRIPT_DIR/hugo/hugo ($HUGO_ROOT -> $PUBLISH_ABS)"
+    echo "               [hugo]  -> source $HUGO_ROOT -> destination $PUBLISH_ABS"
+fi
+echo ""
+
+# --- 1b. Zentralen Hugo-Programmpfad in die hugocms.ini eintragen ----------
+# Das Hugo-Binary wird installationsweit einmal konfiguriert: [hugo] bin in
+# der hugocms.ini. Existiert die Datei bereits (Einrichtung gelaufen) und hat
+# noch keine [hugo]-Sektion, ergänzen wir sie; sonst nur ein Hinweis, da die
+# hugocms.ini erst das Einrichtungs-Setup beim ersten Aufruf erzeugt.
+CONFIG_FILE="$BACKEND_DIR/hugocms.ini"
+HUGO_BIN="$SCRIPT_DIR/hugo/hugo"
+echo "1b. Zentraler Hugo-Programmpfad (hugocms.ini, [hugo] bin)"
+if [ -f "$CONFIG_FILE" ]; then
+    if grep -q '^\[hugo\]' "$CONFIG_FILE"; then
+        echo "    → [hugo]-Sektion vorhanden, bleibt unverändert (bin ggf. prüfen: $HUGO_BIN)."
+    else
+        printf '\n[hugo]\nbin = %s\n' "$HUGO_BIN" >> "$CONFIG_FILE"
+        echo "    → ergänzt: bin = $HUGO_BIN"
+    fi
+else
+    echo "    → hugocms.ini fehlt noch (Einrichtung folgt im Browser)."
+    echo "      Danach in die [hugo]-Sektion eintragen:  bin = $HUGO_BIN"
 fi
 echo ""
 
