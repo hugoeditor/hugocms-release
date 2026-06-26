@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace HugoCMS\FileManager;
 
+use HugoCMS\FileManager\Audit\AuditService;
 use HugoCMS\FileManager\Auth\AuthInterface;
 use HugoCMS\FileManager\Exception\ApiException;
 use Throwable;
@@ -61,6 +62,24 @@ final class Connector
 
     /** Globale [user]-Einstellungen (Sitzungsdauer, Inhaltsbreite). */
     private array $user = ['sessionLifetime' => 28800, 'contentWidth' => 1200];
+
+    /**
+     * Roher Pro-Lizenzschlüssel dieser WEBSEITE (aus der [license]-Sektion der
+     * Mount-Konfiguration) oder null. Schaltet die Pro-Funktionen frei (derzeit
+     * Git). Da die Lizenz pro Webseite gilt, steht sie in mounts/<hash>.ini —
+     * nicht installationsweit. Lazy zu einer License-Instanz aufgelöst.
+     */
+    private ?string $licenseKey = null;
+
+    /** Zwischengespeicherte License-Instanz (an die Domain der Anfrage gebunden). */
+    private ?License $licenseObj = null;
+
+    /**
+     * Pfad der geladenen Mount-Konfiguration (mounts/<hash>.ini bzw. Rückfall
+     * mounts.ini). Ziel der Lizenz-Aktivierung. null bei programmatischer
+     * Konfiguration (custom.php) — dann ist keine Aktivierung möglich.
+     */
+    private ?string $mountsPath = null;
 
     public function __construct(array $options)
     {
@@ -147,6 +166,12 @@ final class Connector
             }
         }
         $this->hugoBin = isset($options['hugoBin']) ? (string) $options['hugoBin'] : null;
+
+        // Programmatisch gesetzter Lizenzschlüssel (custom.php). Im INI-Betrieb
+        // stammt er aus der Mount-Konfiguration (siehe mountsFromFile).
+        if (isset($options['licenseKey'])) {
+            $this->licenseKey = (string) $options['licenseKey'];
+        }
     }
 
     /**
@@ -177,6 +202,11 @@ final class Connector
         $config = MountConfig::load($configPath);
         foreach ($config['mounts'] as $spec) {
             $this->mount($spec['name'], $spec['path'], $spec['options']);
+        }
+        // Pro-Lizenz dieser Webseite und das Ziel künftiger Aktivierungen.
+        $this->mountsPath = $configPath;
+        if ($config['license'] !== null) {
+            $this->licenseKey = $config['license'];
         }
         if ($config['hugo'] !== null) {
             $this->hugo = $config['hugo'];
@@ -255,6 +285,18 @@ final class Connector
                 'config' => $this->cmdConfig(),
                 'reconfigure' => $this->cmdReconfigure($request),
                 'account' => $this->cmdAccount($request),
+                'license' => $this->cmdLicense(),
+                'activate' => $this->cmdActivate($request),
+                'gitstatus' => $this->cmdGitStatus(),
+                'gitlog' => $this->cmdGitLog($request),
+                'gitdiff' => $this->cmdGitDiff($request),
+                'gitcommit' => $this->cmdGitCommit($request),
+                'gitpush' => $this->cmdGitPush(),
+                'gitreset' => $this->cmdGitReset($request),
+                'audit' => $this->cmdAudit(),
+                'auditlist' => $this->cmdAuditList(),
+                'auditget' => $this->cmdAuditGet($request),
+                'auditdelete' => $this->cmdAuditDelete($request),
                 default => throw ApiException::badRequest('UNKNOWN-COMMAND', [$cmd]),
             };
 
@@ -346,6 +388,20 @@ final class Connector
             'ui' => [
                 'contentWidth' => $this->user['contentWidth'],
             ],
+            // Pro-Edition (Git u. Ä.). 'configured' meldet einen hinterlegten,
+            // ggf. ungültigen Schlüssel (falsche Domain) — für einen Hinweis im
+            // Client. Der Schlüssel selbst wird nie zurückgegeben.
+            'license' => $this->license()->info(),
+            // Lässt sich eine Lizenz aktivieren? Nur, wenn eine Mount-Datei
+            // geladen wurde (mounts/<hash>.ini bzw. mounts.ini) — dorthin wird
+            // geschrieben. Bei custom.php (programmatisch) nicht möglich.
+            'licensable' => $this->mountsPath !== null,
+            // Git ist nur nutzbar, wenn die Webseite ein Hugo-Projekt hat
+            // (dort liegt das Repository) UND eine gültige Pro-Lizenz vorliegt.
+            'git' => $this->hugo !== null && $this->license()->isPro(),
+            // Das SEO-Audit hat dieselbe Voraussetzung wie Git: Pro-Lizenz und
+            // ein konfiguriertes Hugo-Projekt (für public/ und content/).
+            'audit' => $this->hugo !== null && $this->license()->isPro(),
         ];
     }
 
@@ -941,6 +997,273 @@ final class Connector
         $this->auth->logout();
 
         return ['ok' => true, 'reauth' => true];
+    }
+
+    // --- Pro-Lizenz --------------------------------------------------------
+
+    /**
+     * Lazy aufgelöste License-Instanz dieser Webseite, an die Domain der Anfrage
+     * gebunden ({@see SiteKey::host}). Der Schlüssel stammt aus der Mount-Konfig.
+     */
+    private function license(): License
+    {
+        return $this->licenseObj ??= new License($this->licenseKey, SiteKey::host($_SERVER));
+    }
+
+    /** Liefert den Lizenzstatus (Edition, Lizenznehmer, Domain) — ohne Schlüssel. */
+    private function cmdLicense(): array
+    {
+        $this->requireAuth();
+
+        return $this->license()->info();
+    }
+
+    /**
+     * Aktiviert eine Pro-Lizenz für DIESE Webseite: prüft den Schlüssel gegen
+     * die aktuelle Domain und schreibt ihn in die [license]-Sektion der
+     * geladenen Mount-Konfiguration (mounts/<hash>.ini). Die übrigen Sektionen
+     * (Mounts, [hugo]) bleiben wörtlich erhalten. Ein ungültiger Schlüssel
+     * (falsche Domain, Signatur) wird abgelehnt, bevor etwas persistiert wird.
+     * Die Edition greift ab dem nächsten Request.
+     */
+    private function cmdActivate(array $request): array
+    {
+        $this->requireAuth();
+        $this->requireMethod('POST');
+        if ($this->mountsPath === null) {
+            // Programmatische Konfiguration (custom.php): keine Datei zum Schreiben.
+            throw new ApiException('ECONFIG', 409, 'ACTIVATION-UNAVAILABLE');
+        }
+
+        $key = trim((string) ($request['key'] ?? ''));
+        if ($key === '') {
+            throw ApiException::badRequest('PARAM-MISSING', ['key']);
+        }
+
+        $domain = SiteKey::host($_SERVER);
+        $decoded = License::decode($key, $domain);
+        if ($decoded === null) {
+            // Bewusst keine Unterscheidung Signatur/Domain nach außen.
+            throw new ApiException('ELICENSE', 422, 'LICENSE-INVALID');
+        }
+
+        Config::updateSections($this->mountsPath, ['license' => ['key' => $key]]);
+        $this->logger->info("Pro-Lizenz aktiviert für {$decoded['licensee']} @ {$decoded['domain']}.");
+
+        // Status mit dem frisch eingetragenen Schlüssel zurückgeben.
+        return (new License($key, $domain))->info();
+    }
+
+    /** Wirft 403, wenn keine gültige Pro-Lizenz für diese Domain vorliegt. */
+    private function requirePro(): void
+    {
+        if (!$this->license()->isPro()) {
+            throw new ApiException('ELICENSE', 403, 'PRO-REQUIRED');
+        }
+    }
+
+    // --- Git (Pro-Funktion) ------------------------------------------------
+
+    /**
+     * Gemeinsamer Einstieg aller Git-Befehle: Anmeldung, Pro-Lizenz und ein
+     * konfiguriertes Hugo-Projekt (dessen source-Verzeichnis das Repository
+     * ist). Liefert den auf dieses Verzeichnis eingesperrten GitService.
+     */
+    private function git(): GitService
+    {
+        $this->requireAuth();
+        $this->requirePro();
+        if ($this->hugo === null) {
+            throw new ApiException('ECONFIG', 409, 'GIT-NO-PROJECT');
+        }
+        $source = (string) $this->hugo['source'];
+        if (!is_dir($source)) {
+            throw new ApiException('ECONFIG', 500, 'HUGO-SOURCE-MISSING', [$source]);
+        }
+
+        return new GitService($source);
+    }
+
+    private function cmdGitStatus(): array
+    {
+        return $this->git()->status();
+    }
+
+    private function cmdGitLog(array $request): array
+    {
+        $page = (int) ($request['page'] ?? 1);
+        $perPage = (int) ($request['perPage'] ?? 20);
+
+        return $this->git()->log($page, $perPage);
+    }
+
+    private function cmdGitDiff(array $request): array
+    {
+        $sha = $this->requireParam($request, 'sha');
+
+        return $this->git()->diff($sha);
+    }
+
+    private function cmdGitCommit(array $request): array
+    {
+        $this->requireMethod('POST');
+        $git = $this->git();
+        $result = $git->commit((string) ($request['message'] ?? ''));
+        if ($result['success']) {
+            $this->logger->info('Git-Commit erstellt: ' . ($result['sha'] ?? '?'));
+        } else {
+            $this->logger->warning('Git-Commit fehlgeschlagen: ' . $result['output']);
+        }
+
+        return $result;
+    }
+
+    private function cmdGitPush(): array
+    {
+        $this->requireMethod('POST');
+        $result = $this->git()->push();
+        if (!$result['success']) {
+            $this->logger->warning('Git-Push fehlgeschlagen: ' . $result['output']);
+        }
+
+        return $result;
+    }
+
+    private function cmdGitReset(array $request): array
+    {
+        $this->requireMethod('POST');
+        $ref = trim((string) ($request['ref'] ?? 'HEAD'));
+
+        return $this->git()->reset($ref);
+    }
+
+    // --- SEO-Audit (Pro-Funktion) -----------------------------------------
+
+    /**
+     * Gemeinsamer Einstieg aller Audit-Befehle: Anmeldung, Pro-Lizenz und ein
+     * konfiguriertes Hugo-Projekt. Liefert den auf public/ (Build) und content/
+     * (Quellen) dieser Webseite eingestellten AuditService. Die Berichte liegen
+     * je Webseite getrennt unter var/audit/<hash(source)>/.
+     */
+    private function audit(): AuditService
+    {
+        $this->requireAuth();
+        $this->requirePro();
+        if ($this->hugo === null) {
+            throw new ApiException('ECONFIG', 409, 'AUDIT-NO-PROJECT');
+        }
+        $source = (string) $this->hugo['source'];
+        $public = (string) ($this->hugo['destination'] ?? $source . '/public');
+        $storage = __DIR__ . '/../var/audit/' . sha1($source);
+
+        return new AuditService($public, $source, $storage);
+    }
+
+    /** Führt einen neuen Audit-Lauf aus (synchron) und liefert den Bericht. */
+    private function cmdAudit(): array
+    {
+        $service = $this->audit();
+        $this->requireMethod('POST');
+        if (!$this->auth->can('build')) {
+            throw ApiException::denied('OPERATION-NOT-ALLOWED', ['build']);
+        }
+        // Der Lauf parst alle gebauten Seiten — wie der Hugo-Lauf großzügig
+        // bemessen, aber ohne Hintergrundprozess (ein Request → eine Antwort).
+        @set_time_limit(120);
+
+        $report = $service->run();
+        $this->logger->info(sprintf(
+            'SEO-Audit: %d Seiten, %d Fehler / %d Warnungen / %d Hinweise (%ss).',
+            (int) ($report['pagesScanned'] ?? 0),
+            (int) ($report['summary']['error'] ?? 0),
+            (int) ($report['summary']['warning'] ?? 0),
+            (int) ($report['summary']['hint'] ?? 0),
+            (string) ($report['seconds'] ?? '0'),
+        ));
+
+        return $this->enrichReport($report);
+    }
+
+    /** Metadaten der gespeicherten Läufe (neueste zuerst). */
+    private function cmdAuditList(): array
+    {
+        return ['runs' => $this->audit()->list()];
+    }
+
+    /** Vollständiger Bericht eines gespeicherten Laufs. */
+    private function cmdAuditGet(array $request): array
+    {
+        $id = $this->requireParam($request, 'id');
+
+        return $this->enrichReport($this->audit()->get($id));
+    }
+
+    /** Löscht einen gespeicherten Lauf. */
+    private function cmdAuditDelete(array $request): array
+    {
+        $this->requireMethod('POST');
+        $id = $this->requireParam($request, 'id');
+
+        return $this->audit()->delete($id);
+    }
+
+    /**
+     * Reichert die Funde eines Berichts um eine Dateimanager-ID (fileId) an,
+     * sofern die Quelldatei in einem Mount liegt — damit das Frontend direkt
+     * zur editierbaren Quelle springen kann. Es wird NIE ein Serverpfad
+     * ausgegeben, nur die undurchsichtige ID.
+     *
+     * @param array<string, mixed> $report
+     * @return array<string, mixed>
+     */
+    private function enrichReport(array $report): array
+    {
+        if ($this->hugo === null || !isset($report['issues']) || !is_array($report['issues'])) {
+            return $report;
+        }
+        $source = (string) $this->hugo['source'];
+        $cache = [];
+        foreach ($report['issues'] as &$issue) {
+            $rel = is_array($issue) ? ($issue['sourceFile'] ?? null) : null;
+            if (!is_string($rel) || $rel === '') {
+                continue;
+            }
+            if (!array_key_exists($rel, $cache)) {
+                $cache[$rel] = $this->resolveFileId($source . '/' . $rel);
+            }
+            if ($cache[$rel] !== null) {
+                $issue['fileId'] = $cache[$rel];
+            }
+        }
+        unset($issue);
+
+        return $report;
+    }
+
+    /**
+     * Übersetzt einen absoluten Serverpfad in eine Dateimanager-ID, falls er
+     * innerhalb eines Mounts liegt; sonst null. Nutzt dieselbe ID-Kodierung wie
+     * der Dateimanager ({@see MountResolver::encodeId}).
+     */
+    private function resolveFileId(string $absPath): ?string
+    {
+        $real = realpath($absPath);
+        if ($real === false) {
+            return null;
+        }
+        foreach ($this->resolver->all() as $mount) {
+            $root = $mount->root();
+            if ($real === $root) {
+                return $this->resolver->encodeId($mount->name(), '');
+            }
+            if (str_starts_with($real, $root . DIRECTORY_SEPARATOR)) {
+                $rel = str_replace('\\', '/', substr($real, strlen($root) + 1));
+
+                return $this->resolver->encodeId($mount->name(), $rel);
+            }
+        }
+
+        return null;
     }
 
     /**
