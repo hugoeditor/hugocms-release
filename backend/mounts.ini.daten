@@ -1,0 +1,55 @@
+; HugoCMS – Mount-Konfiguration (Rückfall)
+; ===========================================================================
+; Diese Datei ist der RÜCKFALL: Sie greift, wenn für die aufgerufene Webseite
+; keine eigene Datei mounts/<hash>.ini existiert (der Client erhält dann einen
+; Einrichtungs-Hinweis). Pro Webseite eine eigene mounts/<hash>.ini anlegen;
+; den Dateinamen liefert die 404-/Warnmeldung oder scripts/site-hash.sh.
+;
+; Format identisch für Rückfall und host-spezifische Dateien.
+;
+; Übergabe an den Connector:
+;
+;     $connector->mountsFromFile(__DIR__ . '/mounts.ini');
+;
+; Regeln:
+;   • Jede [Sektion] ist ein Mount. Der Sektionsname ist die interne ID
+;     (kurz, ohne Leer- und Sonderzeichen).
+;   • path        (Pflicht)  Verzeichnis des Mounts. Relative Pfade gelten
+;                            relativ zu DIESER Datei. Absolute Pfade empfohlen.
+;   • label       (optional) Anzeigename im Client. Standard: Sektionsname.
+;   • permissions (optional) Kommaliste. Werte: read, write, upload, delete,
+;                            mkdir, rename, copy, move. Fehlt sie: alle Rechte.
+;   • accept      (optional) Kommaliste erlaubter Endungen (ohne Punkt).
+;                            Leer oder fehlend: alle Endungen erlaubt.
+;   • readonly    (optional) true = nur Lesen (überschreibt permissions).
+;
+; Werte mit Sonderzeichen bei Bedarf in "doppelte Anführungszeichen" setzen.
+; ===========================================================================
+
+[projekt]
+path = ../daten/
+label = Projekt
+
+[inhalte]
+path = ../daten/inhalte
+label = Inhalte
+accept = md, markdown, html, htm, png, jpg, jpeg, gif, webp, svg
+
+[vorlagen]
+path = ../daten/vorlagen
+label = Vorlagen
+permissions = read, write
+
+[medien]
+path = ../daten/medien
+label = Medien
+
+; Hugo-Aufruf für den Veröffentlichen-Knopf (Entwicklung). Das Hugo-Programm
+; (bin) steht zentral in der hugocms.ini, nicht hier.
+
+[hugo]
+source = ../daten
+destination = ../daten/public
+
+[license]
+key = "HUGOCMS-eyJsaWNlbnNlZSI6IkF1dG9wcm9maXMiLCJkb21haW4iOiIxMjcuMC4wLjEiLCJpc3N1ZWRfYXQiOiIyMDI2LTA2LTI2VDEzOjI4OjQ4WiJ9-daf9e001c74983873fcb12bbefcb576cdc8474486833ede16ac32d43339136e4817d7c27ad00ca6c8c814d04d333b8924293f6bc0b0a8eb874d2a48cdb5f2708"
