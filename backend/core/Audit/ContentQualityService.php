@@ -75,6 +75,9 @@ final class ContentQualityService
             'contentHash' => sha1($body),
             'truncated' => $truncated,
             'verdict' => $verdict,
+            // Eine frische Prüfung löscht einen früheren Verbesserungs-Vermerk.
+            'improvedAt' => null,
+            'improveModel' => null,
         ];
 
         $this->persist($key, $entry);
@@ -113,6 +116,8 @@ final class ContentQualityService
                 'rating' => $readability['rating'] ?? null,
                 'sourceMissing' => $current === null,
                 'stale' => $current !== null && $current !== ($entry['contentHash'] ?? null),
+                'improvedAt' => $entry['improvedAt'] ?? null,
+                'improveModel' => $entry['improveModel'] ?? null,
             ];
         }
         usort($out, static fn (array $a, array $b): int => strcmp((string) ($b['checkedAt'] ?? ''), (string) ($a['checkedAt'] ?? '')));
@@ -131,6 +136,65 @@ final class ContentQualityService
         if ($entry === null) {
             throw ApiException::notFound('AUDIT-CONTENT-NOT-FOUND', [$key]);
         }
+
+        return $entry;
+    }
+
+    /**
+     * Gespeicherter Eintrag zur Datei hinter einer Dateimanager-ID oder null,
+     * falls die Datei noch nie geprüft wurde. Löst die ID über den Resolver auf
+     * (Mount-Einsperrung greift) und bildet daraus denselben Schlüssel wie beim
+     * Prüfen.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function forFile(string $fileId): ?array
+    {
+        $r = $this->resolver->resolve($fileId, true);
+
+        return $this->read($this->pathFor(sha1($r['mount']->name() . ':' . $r['rel'])));
+    }
+
+    /**
+     * Vermerkt eine KI-Bearbeitung an der Datei hinter einer Dateimanager-ID:
+     * setzt {@see improvedAt}/{@see improveModel} am zugehörigen Eintrag. Kein
+     * Eintrag (Datei nie geprüft) → No-op. Wird aus dem Schreibpfad des
+     * Assistenten aufgerufen, darf den Schreibvorgang nie stören.
+     */
+    public function markImproved(string $fileId, string $model): void
+    {
+        try {
+            $r = $this->resolver->resolve($fileId, true);
+        } catch (\Throwable) {
+            return;
+        }
+        $path = $this->pathFor(sha1($r['mount']->name() . ':' . $r['rel']));
+        $entry = $this->read($path);
+        if ($entry === null) {
+            return;
+        }
+        $entry['improvedAt'] = gmdate('c');
+        $entry['improveModel'] = $model;
+        $this->persist($entry['key'] ?? sha1($r['mount']->name() . ':' . $r['rel']), $entry);
+    }
+
+    /**
+     * Nimmt eine bereits verbesserte Datei wieder in die Arbeitsliste auf:
+     * löscht {@see improvedAt}/{@see improveModel} (ohne Neuprüfung). Danach
+     * erscheint sie wieder unter „zu verbessern", falls der Score < 100 ist.
+     *
+     * @return array<string, mixed> aktualisierter Eintrag
+     */
+    public function requeue(string $key): array
+    {
+        $path = $this->pathFor($key);
+        $entry = $this->read($path);
+        if ($entry === null) {
+            throw ApiException::notFound('AUDIT-CONTENT-NOT-FOUND', [$key]);
+        }
+        $entry['improvedAt'] = null;
+        $entry['improveModel'] = null;
+        $this->persist($key, $entry);
 
         return $entry;
     }

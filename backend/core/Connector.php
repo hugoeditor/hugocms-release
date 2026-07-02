@@ -294,6 +294,7 @@ final class Connector
                 'emptytrash' => $this->cmdEmptyTrash($request),
                 'build' => $this->cmdBuild(),
                 'assistant' => $this->cmdAssistant($request),
+                'assistantimprove' => $this->cmdAssistantImprove($request),
                 'config' => $this->cmdConfig(),
                 'reconfigure' => $this->cmdReconfigure($request),
                 'account' => $this->cmdAccount($request),
@@ -313,6 +314,8 @@ final class Connector
                 'auditcontent' => $this->cmdAuditContent($request),
                 'auditcontentlist' => $this->cmdAuditContentList(),
                 'auditcontentget' => $this->cmdAuditContentGet($request),
+                'auditcontentreport' => $this->cmdAuditContentReport($request),
+                'auditcontentrequeue' => $this->cmdAuditContentRequeue($request),
                 'auditcontentdelete' => $this->cmdAuditContentDelete($request),
                 default => throw ApiException::badRequest('UNKNOWN-COMMAND', [$cmd]),
             };
@@ -886,15 +889,131 @@ final class Connector
         // Der Werkzeug-Loop kann mehrere API-Aufrufe nacheinander machen.
         @set_time_limit(180);
 
-        $service = new AssistantService(
-            new AnthropicClient($this->ai['apiKey']),
+        return $this->assistantService()->run(
+            $messages,
+            $confirm === null ? null : (string) $confirm,
+            $locale,
+            $openFilePath,
+            $openDirPath,
+        );
+    }
+
+    /**
+     * Baut den KI-Assistenten mit der aktuellen [ai]-Konfiguration. Nur bei
+     * vorhandenem API-Schlüssel aufrufen (der Client verlangt einen). Das
+     * Werkzeug get_file_report wird nur eingehängt, wenn Pro-Lizenz und
+     * Hugo-Projekt vorliegen (sonst gibt es keinen Audit-/Content-Bericht).
+     */
+    private function assistantService(): AssistantService
+    {
+        // get_file_report und der Bearbeitungs-Vermerk brauchen beide das
+        // Content-Qualitäts-Feature (Pro-Lizenz + Hugo-Projekt).
+        $contentAware = $this->hugo !== null && $this->license()->isPro();
+        $fileReport = $contentAware
+            ? fn (string $fileId): array => $this->buildFileReportById($fileId)
+            : null;
+        $onWrite = $contentAware
+            ? fn (string $fileId) => $this->markFileImproved($fileId)
+            : null;
+
+        return new AssistantService(
+            new AnthropicClient((string) $this->ai['apiKey']),
             $this->ai['model'],
             $this->ai['writeMode'],
             $this->resolver,
             $this->files,
+            $fileReport,
+            $onWrite,
         );
+    }
 
-        return $service->run($messages, $confirm === null ? null : (string) $confirm, $locale, $openFilePath, $openDirPath);
+    /**
+     * Vermerkt eine KI-Bearbeitung am Content-Qualitäts-Eintrag der Datei (jede
+     * vom Assistenten geschriebene Datei gilt als „verbessert"). Ohne
+     * Hugo-Projekt oder ohne vorhandenen Eintrag ein No-op. Das Modell ist das
+     * konfigurierte Assistenten-Modell.
+     */
+    private function markFileImproved(string $fileId): void
+    {
+        if ($this->hugo === null) {
+            return;
+        }
+        $storage = __DIR__ . '/../var/audit-content/' . sha1((string) $this->hugo['source']);
+        (new ContentQualityService(
+            new AnthropicClient((string) $this->ai['apiKey']),
+            $this->ai['model'],
+            $this->resolver,
+            $this->files,
+            $storage,
+        ))->markImproved($fileId, $this->ai['model']);
+    }
+
+    /**
+     * Startet einen Assistenten-Zug, der eine einzelne Content-Datei anhand
+     * ihres Gesamt-Berichts verbessert. Auslösung durch den Benutzer (beliebige
+     * Datei); der spätere Cron nutzt denselben Weg (erste Datei der Liste). Der
+     * Schreibmodus ist der konfigurierte — bei "confirm" pausiert der Lauf vor
+     * dem Schreiben und der Client lässt bestätigen (wie beim normalen Assistenten).
+     */
+    private function cmdAssistantImprove(array $request): array
+    {
+        $this->requireAuth();
+        $this->requireMethod('POST');
+        $this->requirePro();
+        if ($this->hugo === null) {
+            throw new ApiException('ECONFIG', 409, 'AUDIT-NO-PROJECT');
+        }
+        if ($this->ai['apiKey'] === null) {
+            throw new ApiException('ECONFIG', 409, 'AI-NOT-CONFIGURED');
+        }
+        $id = $this->requireParam($request, 'id');
+        $locale = (string) ($request['locale'] ?? 'de');
+        $r = $this->resolver->resolve($id, true);
+        $path = $r['mount']->name() . '/' . $r['rel'];
+
+        @set_time_limit(180);
+
+        return $this->assistantService()->run(
+            [['role' => 'user', 'content' => $this->improveInstruction($path, $locale)]],
+            null,
+            $locale,
+            $path,
+        );
+    }
+
+    /** Startanweisung für den Verbesserungslauf (in der Sprache des Benutzers). */
+    private function improveInstruction(string $path, string $locale): string
+    {
+        if (str_starts_with(strtolower($locale), 'en')) {
+            return "Improve the existing content file `{$path}`. Steps: (1) call get_file_report for this path and act on BOTH parts — the content-quality verdict AND the SEO findings; (2) read the file; (3) fix the reported issues and write the improved version in a SINGLE write_file call. Adopt the file's existing front-matter format. Address the SEO findings as far as this file allows (e.g. title/H1 duplication, missing meta description, Open Graph / Twitter fields). If a SEO finding depends on which front-matter field the theme reads (e.g. og:image), you MAY READ the relevant layout/partial to find the correct field — but WRITE only this content file. Keep the front matter valid and preserve the author's meaning.";
+        }
+
+        return "Verbessere die bestehende Content-Datei `{$path}`. Vorgehen: (1) rufe get_file_report für diesen Pfad auf und beachte BEIDE Teile — das Qualitätsurteil UND die SEO-Funde; (2) lies die Datei; (3) behebe die gemeldeten Probleme und schreibe die verbesserte Fassung in EINEM write_file-Aufruf. Übernimm das vorhandene Front-Matter-Format der Datei. Behebe die SEO-Funde, soweit über diese Datei möglich (z. B. Titel/H1-Dopplung, fehlende Meta-Description, Open-Graph-/Twitter-Felder). Hängt ein SEO-Fund davon ab, welches Front-Matter-Feld das Theme auswertet (etwa og:image), darfst du das betreffende Layout/Partial NUR LESEN, um das richtige Feld zu finden — GESCHRIEBEN wird ausschließlich diese Content-Datei. Halte das Front-Matter gültig und bewahre die Aussage des Autors.";
+    }
+
+    /**
+     * Gesamt-Bericht einer Datei anhand ihrer Dateimanager-ID (für das
+     * Assistenten-Werkzeug get_file_report). Qualitätsurteil optional (null,
+     * wenn die Datei nie geprüft wurde), SEO-Funde aus dem jüngsten Lauf.
+     *
+     * @return array<string, mixed>
+     */
+    private function buildFileReportById(string $fileId): array
+    {
+        $r = $this->resolver->resolve($fileId, true);
+        $mount = $r['mount']->name();
+        $entry = $this->contentQuality()->forFile($fileId); // null, falls nie geprüft
+        $base = is_array($entry) ? $entry : ['mount' => $mount, 'rel' => $r['rel'], 'title' => basename($r['rel'])];
+
+        return [
+            'file' => $this->withContentFileId([
+                'mount' => $mount,
+                'rel' => $r['rel'],
+                'title' => $base['title'] ?? basename($r['rel']),
+            ]),
+            'contentQuality' => $entry,
+            'audit' => $this->auditIssuesForEntry($base),
+        ];
     }
 
     /** Erlaubte Log-Stufen — gemeinsam für Lesen (config) und Schreiben. */
@@ -1319,6 +1438,114 @@ final class Connector
         $key = $this->requireParam($request, 'key');
 
         return $this->contentQuality()->delete($key);
+    }
+
+    /**
+     * Nimmt eine bereits verbesserte Seite wieder in die Arbeitsliste auf
+     * (löscht den Verbesserungs-Vermerk, ohne neu zu prüfen).
+     */
+    private function cmdAuditContentRequeue(array $request): array
+    {
+        $service = $this->contentQuality();
+        $this->requireMethod('POST');
+        $key = $this->requireParam($request, 'key');
+
+        return $this->withContentFileId($service->requeue($key));
+    }
+
+    /**
+     * Gesamt-Bericht über EINE Content-Datei: das gespeicherte Qualitätsurteil
+     * plus die SEO-Funde derselben Datei aus dem JÜNGSTEN Audit-Lauf. Der
+     * Audit-Teil ist null, wenn (noch) kein Lauf vorliegt. Dieselbe Struktur
+     * nutzen später sowohl die Ansicht als auch der KI-Assistent, um gezielt
+     * eine Datei zu verbessern.
+     */
+    private function cmdAuditContentReport(array $request): array
+    {
+        $service = $this->contentQuality();
+        $key = $this->requireParam($request, 'key');
+        $entry = $service->get($key); // wirft AUDIT-CONTENT-NOT-FOUND, falls unbekannt
+
+        return [
+            'file' => $this->withContentFileId([
+                'mount' => $entry['mount'] ?? null,
+                'rel' => $entry['rel'] ?? null,
+                'title' => $entry['title'] ?? null,
+            ]),
+            'contentQuality' => $entry,
+            'audit' => $this->auditIssuesForEntry($entry),
+        ];
+    }
+
+    /**
+     * SEO-Funde des jüngsten Audit-Laufs, die zur Quelldatei eines Content-
+     * Eintrags gehören. null, wenn kein Lauf vorliegt. Jeder Fund erhält die
+     * fileId der Datei, damit das Frontend zur Quelle springen kann.
+     *
+     * @param array<string, mixed> $entry
+     * @return array<string, mixed>|null
+     */
+    private function auditIssuesForEntry(array $entry): ?array
+    {
+        $report = $this->audit()->latest();
+        if ($report === null) {
+            return null;
+        }
+        $summary = ['error' => 0, 'warning' => 0, 'hint' => 0];
+        $issues = [];
+        $rel = $this->sourceRelForEntry($entry);
+        if ($rel !== null) {
+            $fileId = $this->withContentFileId($entry)['fileId'] ?? null;
+            foreach ($report['issues'] ?? [] as $issue) {
+                if (!is_array($issue) || ($issue['sourceFile'] ?? null) !== $rel) {
+                    continue;
+                }
+                if ($fileId !== null) {
+                    $issue['fileId'] = $fileId;
+                }
+                $issues[] = $issue;
+                $sev = (string) ($issue['severity'] ?? '');
+                if (isset($summary[$sev])) {
+                    $summary[$sev]++;
+                }
+            }
+        }
+
+        return [
+            'runId' => $report['id'] ?? null,
+            'startedAt' => $report['startedAt'] ?? null,
+            'issues' => $issues,
+            'summary' => $summary,
+        ];
+    }
+
+    /**
+     * Quellpfad relativ zum Hugo-Projekt (wie das sourceFile der Audit-Funde)
+     * für einen Content-Eintrag, oder null, wenn die Datei nicht mehr auflösbar
+     * ist oder außerhalb des Projekts liegt.
+     *
+     * @param array<string, mixed> $entry
+     */
+    private function sourceRelForEntry(array $entry): ?string
+    {
+        $mount = $entry['mount'] ?? null;
+        $rel = $entry['rel'] ?? null;
+        if ($this->hugo === null || !is_string($mount) || !is_string($rel)
+            || !isset($this->resolver->all()[$mount])) {
+            return null;
+        }
+        try {
+            $r = $this->resolver->resolve($this->resolver->encodeId($mount, $rel), true);
+        } catch (Throwable) {
+            return null;
+        }
+        $sourceReal = realpath((string) $this->hugo['source']);
+        $abs = $r['abs']; // von resolve(mustExist) bereits als realpath geliefert
+        if ($sourceReal === false) {
+            return null;
+        }
+
+        return str_starts_with($abs, $sourceReal . '/') ? substr($abs, strlen($sourceReal) + 1) : null;
     }
 
     /**
