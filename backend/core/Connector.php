@@ -61,6 +61,15 @@ final class Connector
      */
     private array $ai = ['apiKey' => null, 'model' => 'claude-opus-4-8', 'writeMode' => 'confirm'];
 
+    /**
+     * Externe Pro-Dienste aus der [services]-Sektion der hugocms.ini. Derzeit
+     * der Transkriptionsdienst (seo-success) für die Spracheingabe.
+     * speechKey/speechUrl = null → Spracheingabe aus.
+     *
+     * @var array{speechKey: ?string, speechUrl: ?string}
+     */
+    private array $services = ['speechKey' => null, 'speechUrl' => null];
+
     /** Globale [user]-Einstellungen (Sitzungsdauer, Inhaltsbreite). */
     private array $user = ['sessionLifetime' => 28800, 'contentWidth' => 1200];
 
@@ -119,6 +128,7 @@ final class Connector
             $options['logLevel'] ??= $cfg['log']['level'] ?? 'error';
             $options['hugoBin'] ??= $cfg['hugoBin'];
             $this->ai = $cfg['ai'];
+            $this->services = $cfg['services'];
             $this->user = $cfg['user'];
             $authConfig = $cfg['auth'];
             // Globale [user]-Einstellungen an den Auth-Treiber durchreichen
@@ -295,7 +305,9 @@ final class Connector
                 'emptytrash' => $this->cmdEmptyTrash($request),
                 'build' => $this->cmdBuild(),
                 'assistant' => $this->cmdAssistant($request),
+                'assistantping' => $this->cmdAssistantPing(),
                 'assistantimprove' => $this->cmdAssistantImprove($request),
+                'speech' => $this->cmdSpeech($request),
                 'config' => $this->cmdConfig(),
                 'reconfigure' => $this->cmdReconfigure($request),
                 'account' => $this->cmdAccount($request),
@@ -317,6 +329,7 @@ final class Connector
                 'auditcontentget' => $this->cmdAuditContentGet($request),
                 'auditcontentreport' => $this->cmdAuditContentReport($request),
                 'auditcontentrequeue' => $this->cmdAuditContentRequeue($request),
+                'auditcontentupdate' => $this->cmdAuditContentUpdate($request),
                 'auditcontentdelete' => $this->cmdAuditContentDelete($request),
                 default => throw ApiException::badRequest('UNKNOWN-COMMAND', [$cmd]),
             };
@@ -426,6 +439,12 @@ final class Connector
             // Die LLM-Content-Prüfung braucht zusätzlich einen konfigurierten
             // KI-Schlüssel ([ai] api_key).
             'auditContent' => $this->hugo !== null && $this->license()->isPro() && $this->ai['apiKey'] !== null,
+            // Spracheingabe (Pro): der externe Transkriptionsdienst muss
+            // konfiguriert sein ([services] speech_key/speech_url) UND eine
+            // gültige Pro-Lizenz vorliegen. Unabhängig vom Hugo-Projekt.
+            'speech' => $this->license()->isPro()
+                && $this->services['speechKey'] !== null
+                && $this->services['speechUrl'] !== null,
         ];
     }
 
@@ -938,6 +957,26 @@ final class Connector
     }
 
     /**
+     * assistantping — Bereitschaftsprüfung des KI-Assistenten. Ein GET auf
+     * /v1/models (ohne Token-Verbrauch) verifiziert, dass die Claude-API
+     * erreichbar und der hinterlegte Schlüssel gültig ist. Erfolg → ready:true;
+     * bei Problemen wirft ping() den passenden Fehler (Erreichbarkeit/Schlüssel).
+     *
+     * @return array{ready: bool}
+     */
+    private function cmdAssistantPing(): array
+    {
+        $this->requireAuth();
+        if ($this->ai['apiKey'] === null) {
+            throw new ApiException('ECONFIG', 409, 'AI-NOT-CONFIGURED');
+        }
+
+        (new AnthropicClient((string) $this->ai['apiKey']))->ping();
+
+        return ['ready' => true];
+    }
+
+    /**
      * Baut den KI-Assistenten mit der aktuellen [ai]-Konfiguration. Nur bei
      * vorhandenem API-Schlüssel aufrufen (der Client verlangt einen). Das
      * Werkzeug get_file_report wird nur eingehängt, wenn Pro-Lizenz und
@@ -964,6 +1003,63 @@ final class Connector
             $fileReport,
             $onWrite,
         );
+    }
+
+    /**
+     * speech — Spracheingabe (Pro). Nimmt eine hochgeladene Audiodatei (Feld
+     * „audio") entgegen und reicht sie an den externen Transkriptionsdienst
+     * (seo-success) weiter; liefert den erkannten Text. Der Dienst-Schlüssel
+     * bleibt serverseitig und wird nie an den Client gegeben.
+     *
+     * @return array{text: string, duration: float}
+     */
+    private function cmdSpeech(array $request): array
+    {
+        $this->requireAuth();
+        $this->requireMethod('POST');
+        $this->requirePro();
+        if ($this->services['speechKey'] === null || $this->services['speechUrl'] === null) {
+            throw new ApiException('ECONFIG', 409, 'SPEECH-NOT-CONFIGURED');
+        }
+
+        // Genau eine Audiodatei erwartet (kein files[]-Array wie beim Upload).
+        $file = $_FILES['audio'] ?? null;
+        if (!is_array($file) || is_array($file['name'] ?? null)) {
+            throw ApiException::badRequest('PARAM-MISSING', ['audio']);
+        }
+        if ((int) ($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
+            throw ApiException::badRequest('UPLOAD-FAILED', ['audio']);
+        }
+        $tmp = (string) ($file['tmp_name'] ?? '');
+        if ($tmp === '' || !is_uploaded_file($tmp)) {
+            throw ApiException::badRequest('PARAM-MISSING', ['audio']);
+        }
+        // Diktate sind klein; Obergrenze (25 MB) schützt vor Missbrauch.
+        if ((int) ($file['size'] ?? 0) > 26214400) {
+            throw new ApiException('EINVAL', 413, 'AUDIO-TOO-LARGE');
+        }
+
+        // Sprache aus dem Locale (de/en) als Hinweis an die Erkennung.
+        $locale = strtolower(trim((string) ($request['locale'] ?? '')));
+        $lang = preg_match('/^[a-z]{2}$/', $locale) === 1 ? $locale : null;
+
+        @set_time_limit(180);
+
+        $client = new SpeechClient(
+            (string) $this->services['speechUrl'],
+            (string) $this->services['speechKey'],
+        );
+        $result = $client->transcribe(
+            $tmp,
+            (string) ($file['name'] ?? 'audio'),
+            (string) ($file['type'] ?? 'application/octet-stream'),
+            $lang,
+        );
+
+        return [
+            'text' => (string) ($result['text'] ?? ''),
+            'duration' => (float) ($result['duration'] ?? 0.0),
+        ];
     }
 
     /**
@@ -1126,10 +1222,10 @@ final class Connector
     private function improveInstruction(string $path, string $locale): string
     {
         if (str_starts_with(strtolower($locale), 'en')) {
-            return "Improve the existing content file `{$path}`. Steps: (1) call get_file_report for this path and act on BOTH parts — the content-quality verdict AND the SEO findings; (2) read the file; (3) fix the reported issues and write the improved version in a SINGLE write_file call. Adopt the file's existing front-matter format. Address the SEO findings as far as this file allows (e.g. title/H1 duplication, missing meta description, Open Graph / Twitter fields). If a SEO finding depends on which front-matter field the theme reads (e.g. og:image), you MAY READ the relevant layout/partial to find the correct field — but WRITE only this content file. Keep the front matter valid and preserve the author's meaning.";
+            return "Improve the existing content file `{$path}`. Steps: (1) call get_file_report for this path and act on BOTH parts — the content-quality verdict AND the SEO findings; (2) read the file; (3) fix the reported issues and write the improved version in a SINGLE write_file call. If the report contains a non-empty `userInstruction` field, it is an explicit instruction from the site owner and OVERRIDES conflicting findings or suggestions — follow it exactly. Adopt the file's existing front-matter format. Address the SEO findings as far as this file allows (e.g. title/H1 duplication, missing meta description, Open Graph / Twitter fields). If a SEO finding depends on which front-matter field the theme reads (e.g. og:image), you MAY READ the relevant layout/partial to find the correct field — but WRITE only this content file. Keep the front matter valid and preserve the author's meaning.";
         }
 
-        return "Verbessere die bestehende Content-Datei `{$path}`. Vorgehen: (1) rufe get_file_report für diesen Pfad auf und beachte BEIDE Teile — das Qualitätsurteil UND die SEO-Funde; (2) lies die Datei; (3) behebe die gemeldeten Probleme und schreibe die verbesserte Fassung in EINEM write_file-Aufruf. Übernimm das vorhandene Front-Matter-Format der Datei. Behebe die SEO-Funde, soweit über diese Datei möglich (z. B. Titel/H1-Dopplung, fehlende Meta-Description, Open-Graph-/Twitter-Felder). Hängt ein SEO-Fund davon ab, welches Front-Matter-Feld das Theme auswertet (etwa og:image), darfst du das betreffende Layout/Partial NUR LESEN, um das richtige Feld zu finden — GESCHRIEBEN wird ausschließlich diese Content-Datei. Halte das Front-Matter gültig und bewahre die Aussage des Autors.";
+        return "Verbessere die bestehende Content-Datei `{$path}`. Vorgehen: (1) rufe get_file_report für diesen Pfad auf und beachte BEIDE Teile — das Qualitätsurteil UND die SEO-Funde; (2) lies die Datei; (3) behebe die gemeldeten Probleme und schreibe die verbesserte Fassung in EINEM write_file-Aufruf. Enthält der Bericht ein nicht leeres Feld `userInstruction`, ist das eine ausdrückliche Anweisung des Betreibers und hat VORRANG vor widersprechenden Funden oder Vorschlägen — befolge sie genau. Übernimm das vorhandene Front-Matter-Format der Datei. Behebe die SEO-Funde, soweit über diese Datei möglich (z. B. Titel/H1-Dopplung, fehlende Meta-Description, Open-Graph-/Twitter-Felder). Hängt ein SEO-Fund davon ab, welches Front-Matter-Feld das Theme auswertet (etwa og:image), darfst du das betreffende Layout/Partial NUR LESEN, um das richtige Feld zu finden — GESCHRIEBEN wird ausschließlich diese Content-Datei. Halte das Front-Matter gültig und bewahre die Aussage des Autors.";
     }
 
     /**
@@ -1628,6 +1724,36 @@ final class Connector
         $service = $this->contentQuality();
         $key = $this->requireParam($request, 'key');
         $entry = $service->get($key); // wirft AUDIT-CONTENT-NOT-FOUND, falls unbekannt
+
+        return [
+            'file' => $this->withContentFileId([
+                'mount' => $entry['mount'] ?? null,
+                'rel' => $entry['rel'] ?? null,
+                'title' => $entry['title'] ?? null,
+            ]),
+            'contentQuality' => $entry,
+            'audit' => $this->auditIssuesForEntry($entry),
+        ];
+    }
+
+    /**
+     * Speichert die vom Benutzer bearbeiteten Teile eines Berichts: die
+     * Vorschlagsliste und ein optionales Freitext-Feld (Anweisung an die KI).
+     * Die KI-Befunde bleiben unverändert. Liefert denselben Gesamt-Bericht wie
+     * {@see cmdAuditContentReport} zurück, damit die Ansicht direkt aktualisiert.
+     */
+    private function cmdAuditContentUpdate(array $request): array
+    {
+        $service = $this->contentQuality();
+        $this->requireMethod('POST');
+        $key = $this->requireParam($request, 'key');
+
+        $suggestions = $request['suggestions'] ?? [];
+        $suggestions = is_array($suggestions) ? array_values($suggestions) : [];
+        $instruction = $request['instruction'] ?? null;
+        $instruction = is_string($instruction) ? $instruction : null;
+
+        $entry = $service->updateEditable($key, $suggestions, $instruction);
 
         return [
             'file' => $this->withContentFileId([
