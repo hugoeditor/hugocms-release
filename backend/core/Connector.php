@@ -82,7 +82,7 @@ final class Connector
     private array $services = ['speechKey' => null, 'speechUrl' => null];
 
     /** Globale [user]-Einstellungen (Sitzungsdauer, Inhaltsbreite). */
-    private array $user = ['sessionLifetime' => 28800, 'contentWidth' => 1200];
+    private array $user = ['sessionLifetime' => 28800, 'contentWidth' => 1200, 'updateLastmod' => null];
 
     /**
      * Roher Pro-Lizenzschlüssel dieser WEBSEITE (aus der [license]-Sektion der
@@ -321,6 +321,7 @@ final class Connector
                 'speech' => $this->cmdSpeech($request),
                 'config' => $this->cmdConfig(),
                 'reconfigure' => $this->cmdReconfigure($request),
+                'setupdatelastmod' => $this->cmdSetUpdateLastmod($request),
                 'account' => $this->cmdAccount($request),
                 'license' => $this->cmdLicense(),
                 'activate' => $this->cmdActivate($request),
@@ -402,6 +403,25 @@ final class Connector
         });
     }
 
+    /**
+     * Protokolliert eine Ausnahme im Anwendungslog (immer auf Stufe „error",
+     * also unabhängig von der konfigurierten Log-Stufe sichtbar). Gedacht für
+     * CLI-Einstiegspunkte (Cron), die Ausnahmen selbst abfangen und dadurch den
+     * globalen set_exception_handler NICHT auslösen — ohne diesen Aufruf stünde
+     * der Fehler nur auf STDERR (Cron-Mail), nicht in hugocms.log.
+     */
+    public function logException(Throwable $e): void
+    {
+        if ($e instanceof ApiException) {
+            $this->logger->error('Cron abgebrochen: ' . $e->getMessage(), [
+                'code' => $e->errorCode(),
+                'at' => $e->getFile() . ':' . $e->getLine(),
+            ]);
+            return;
+        }
+        $this->logger->exception($e);
+    }
+
     // --- Befehle -----------------------------------------------------------
 
     private function cmdWhoami(): array
@@ -438,6 +458,9 @@ final class Connector
             // Modus der Startwert für die Fensterbreite nach jedem Neuladen.
             'ui' => [
                 'contentWidth' => $this->user['contentWidth'],
+                // Dreiwertig: null = beim Speichern nach lastmod-Aktualisierung
+                // fragen; true/false = ohne Nachfrage anwenden.
+                'updateLastmod' => $this->user['updateLastmod'],
             ],
             // Pro-Edition (Git u. Ä.). 'configured' meldet einen hinterlegten,
             // ggf. ungültigen Schlüssel (falsche Domain) — für einen Hinweis im
@@ -1677,6 +1700,34 @@ final class Connector
         $this->logger->info('Konfiguration aktualisiert (reconfigure).');
 
         return ['ok' => true];
+    }
+
+    /**
+     * Merkt die Benutzerwahl, ob beim Speichern das Front-Matter-Feld `lastmod`
+     * auf die aktuelle Zeit gesetzt werden soll, in [user] update_lastmod. Die
+     * übrigen [user]-Werte (session_lifetime, content_width) bleiben erhalten:
+     * updateSections ersetzt die ganze Sektion, deshalb werden sie roh gelesen
+     * und wieder mitgeschrieben.
+     */
+    private function cmdSetUpdateLastmod(array $request): array
+    {
+        $this->requireAuth();
+        $this->requireMethod('POST');
+        if ($this->configPath === null) {
+            throw new ApiException('ECONFIG', 409, 'RECONFIGURE-UNAVAILABLE');
+        }
+        $value = $request['value'] ?? null;
+        if (!is_bool($value)) {
+            throw ApiException::badRequest('PARAM-INVALID', ['value']);
+        }
+
+        $user = Config::raw($this->configPath)['user'] ?? [];
+        $user['update_lastmod'] = $value ? 'true' : 'false';
+        Config::updateSections($this->configPath, ['user' => $user]);
+        $this->user['updateLastmod'] = $value;
+        $this->logger->info('Benutzereinstellung update_lastmod: ' . ($value ? 'true' : 'false'));
+
+        return ['ok' => true, 'updateLastmod' => $value];
     }
 
     /**
