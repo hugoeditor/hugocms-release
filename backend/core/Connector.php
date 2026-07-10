@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace HugoCMS\FileManager;
 
+use HugoCMS\FileManager\Audit\AuditMailReport;
 use HugoCMS\FileManager\Audit\AuditService;
 use HugoCMS\FileManager\Audit\ContentQualityService;
 use HugoCMS\FileManager\Auth\AuthInterface;
@@ -85,6 +86,14 @@ final class Connector
     private array $user = ['sessionLifetime' => 28800, 'contentWidth' => 1200, 'updateLastmod' => null];
 
     /**
+     * E-Mail-Versand aus der [mail]-Sektion der hugocms.ini (Gesundheitscheck-
+     * Benachrichtigung). configured=false → kein Versand möglich.
+     *
+     * @var array{configured: bool, host: ?string, port: int, security: string, user: ?string, pass: ?string, from: ?string, to: ?string}
+     */
+    private array $mail = ['configured' => false, 'host' => null, 'port' => 587, 'security' => 'tls', 'user' => null, 'pass' => null, 'from' => null, 'to' => null];
+
+    /**
      * Roher Pro-Lizenzschlüssel dieser WEBSEITE (aus der [license]-Sektion der
      * Mount-Konfiguration) oder null. Schaltet die Pro-Funktionen frei (derzeit
      * Git). Da die Lizenz pro Webseite gilt, steht sie in mounts/<hash>.ini —
@@ -137,10 +146,13 @@ final class Connector
             // Log nur aus der Datei übernehmen, wenn nicht explizit gesetzt.
             $options['log'] ??= $cfg['log']['file'];
             $options['logLevel'] ??= $cfg['log']['level'] ?? 'error';
+            $options['logMaxBytes'] ??= $cfg['log']['maxBytes'] ?? 1_048_576;
+            $options['logKeep'] ??= $cfg['log']['keep'] ?? 3;
             $options['hugoBin'] ??= $cfg['hugoBin'];
             $this->ai = $cfg['ai'];
             $this->services = $cfg['services'];
             $this->user = $cfg['user'];
+            $this->mail = $cfg['mail'];
             $authConfig = $cfg['auth'];
             // Globale [user]-Einstellungen an den Auth-Treiber durchreichen
             // (z. B. Sitzungsdauer für SingleUser).
@@ -150,7 +162,12 @@ final class Connector
 
         // Logger und Fehler-Handler: danach werden auch Fehler in der Auth-
         // Erzeugung, in mount() und im weiteren Konstruktor erfasst.
-        $this->logger = new Logger($options['log'] ?? null, $options['logLevel'] ?? 'error');
+        $this->logger = new Logger(
+            $options['log'] ?? null,
+            $options['logLevel'] ?? 'error',
+            (int) ($options['logMaxBytes'] ?? 1_048_576),
+            (int) ($options['logKeep'] ?? 3),
+        );
         $this->registerErrorHandlers();
 
         // Fehlt das Log-Verzeichnis, schreibt der Logger ins Server-Log — Hinweis.
@@ -276,6 +293,18 @@ final class Connector
     public function logWarning(string $message): self
     {
         $this->logger->warning($message);
+
+        return $this;
+    }
+
+    /**
+     * Schreibt eine Meldung auf Stufe „debug" ins Log — für erwartbare,
+     * betrieblich unkritische Vorgänge (z. B. Rückfall auf die Standard-
+     * mounts.ini), die pro Request anfallen und das Log sonst zumüllen.
+     */
+    public function logDebug(string $message): self
+    {
+        $this->logger->debug($message);
 
         return $this;
     }
@@ -1382,10 +1411,12 @@ final class Connector
 
         @set_time_limit(180);
 
-        $client = new SpeechClient(
-            (string) $this->services['speechUrl'],
-            (string) $this->services['speechKey'],
-        );
+        // speech_url ist die Basis-Adresse; der Endpunkt wird angehängt (robust
+        // gegen fehlenden/vorhandenen Schrägstrich und bereits volle URLs).
+        $base = rtrim((string) $this->services['speechUrl'], '/');
+        $endpoint = str_ends_with($base, '/v1/transcribe') ? $base : $base . '/v1/transcribe';
+
+        $client = new SpeechClient($endpoint, (string) $this->services['speechKey']);
         $result = $client->transcribe(
             $tmp,
             (string) ($file['name'] ?? 'audio'),
@@ -1460,6 +1491,85 @@ final class Connector
         }
 
         return ['candidates' => count($work), 'processed' => $processed];
+    }
+
+    /**
+     * Gesundheitscheck der Webseite (Pro-Funktion, CLI-/Cron-Einstieg). Führt den
+     * SEO-Audit über den vorhandenen public/-Ordner aus (baut NICHT selbst) und
+     * benachrichtigt bei Fehlern oder Warnungen per E-Mail (siehe [mail] in der
+     * hugocms.ini). Spiegelt {@see improveNextContent()}: kein requireAuth (im CLI
+     * gibt es keine Session), aber requirePro — außer beim Probelauf.
+     *
+     * @return array{summary: array<string,int>, pagesScanned: int, problems: bool, mailed: bool, dryRun: bool, reportId: ?string}
+     */
+    public function runHealthCheck(bool $dryRun = false): array
+    {
+        if ($this->hugo === null) {
+            throw new ApiException('ECONFIG', 409, 'AUDIT-NO-PROJECT');
+        }
+        if (!$dryRun) {
+            $this->requirePro();
+        }
+        // Der Lauf parst alle gebauten Seiten — wie cmdAudit großzügig bemessen.
+        @set_time_limit(120);
+
+        // Wirft AUDIT-NO-BUILD-OUTPUT, wenn public/ fehlt — der geforderte klare
+        // Fehler statt eines leeren Berichts.
+        $report = $this->auditStore()->run();
+        $summary = is_array($report['summary'] ?? null)
+            ? $report['summary']
+            : ['error' => 0, 'warning' => 0, 'hint' => 0];
+        $problems = ((int) ($summary['error'] ?? 0) + (int) ($summary['warning'] ?? 0)) > 0;
+
+        $this->logger->info(sprintf(
+            'Gesundheitscheck: %d Seiten, %d Fehler / %d Warnungen / %d Hinweise (%ss).',
+            (int) ($report['pagesScanned'] ?? 0),
+            (int) ($summary['error'] ?? 0),
+            (int) ($summary['warning'] ?? 0),
+            (int) ($summary['hint'] ?? 0),
+            (string) ($report['seconds'] ?? '0'),
+        ));
+
+        $mailed = false;
+        if ($problems && !$dryRun) {
+            if (empty($this->mail['configured'])) {
+                // Nicht still schlucken: Es gibt zu meldende Probleme, aber keinen
+                // Versandweg — als Konfigurationsfehler melden.
+                $this->logger->warning('Gesundheitscheck: Probleme gefunden, aber [mail] ist nicht konfiguriert — keine Benachrichtigung möglich.');
+                throw new ApiException('ECONFIG', 409, 'MAIL-NOT-CONFIGURED');
+            }
+            [$subject, $body] = AuditMailReport::format(
+                $report,
+                $this->helpDir,
+                'de',
+                SiteKey::host($_SERVER),
+            );
+            $this->buildMailer()->send((string) $this->mail['to'], $subject, $body);
+            $this->logger->info(sprintf('Gesundheitscheck: Benachrichtigung an %s gesendet.', (string) $this->mail['to']));
+            $mailed = true;
+        }
+
+        return [
+            'summary' => $summary,
+            'pagesScanned' => (int) ($report['pagesScanned'] ?? 0),
+            'problems' => $problems,
+            'mailed' => $mailed,
+            'dryRun' => $dryRun,
+            'reportId' => $report['id'] ?? null,
+        ];
+    }
+
+    /** Baut den SMTP-Mailer aus der [mail]-Konfiguration (setzt configured voraus). */
+    private function buildMailer(): Mailer
+    {
+        return new Mailer(
+            (string) $this->mail['host'],
+            (int) $this->mail['port'],
+            (string) $this->mail['security'],
+            $this->mail['user'],
+            $this->mail['pass'],
+            (string) $this->mail['from'],
+        );
     }
 
     /**
@@ -1608,6 +1718,9 @@ final class Connector
     /** Erlaubte Schreibmodi des KI-Assistenten. */
     private const AI_WRITE_MODES = ['readonly', 'confirm', 'auto'];
 
+    /** Erlaubte SMTP-Sicherheitsstufen für den E-Mail-Versand. */
+    private const MAIL_SECURITIES = ['tls', 'ssl', 'none'];
+
     /** Mindestlänge für ein neu gesetztes Passwort (wie im Erst-Setup). */
     private const MIN_PASSWORD_LENGTH = 8;
 
@@ -1638,6 +1751,20 @@ final class Connector
             'aiModelAudit' => $raw['ai']['model_audit'] ?? '',
             'aiWriteMode'  => $raw['ai']['write_mode'] ?? 'confirm',
             'aiWriteModes' => self::AI_WRITE_MODES,
+            // Spracheingabe (Pro-Dienst): Status + Basis-URL, aber NIE der
+            // Schlüssel. Leere URL → der Client füllt den Standard vor.
+            'speechConfigured' => trim((string) ($raw['services']['speech_key'] ?? '')) !== '',
+            'speechUrl'        => $raw['services']['speech_url'] ?? '',
+            // E-Mail-Versand (Gesundheitscheck): alle Werte AUSSER dem Passwort.
+            // mailPassConfigured zeigt nur an, ob bereits eines hinterlegt ist.
+            'mailHost'           => $raw['mail']['smtp_host'] ?? '',
+            'mailPort'           => $raw['mail']['smtp_port'] ?? '',
+            'mailSecurity'       => $raw['mail']['smtp_security'] ?? '',
+            'mailSecurities'     => self::MAIL_SECURITIES,
+            'mailUser'           => $raw['mail']['smtp_user'] ?? '',
+            'mailFrom'           => $raw['mail']['from'] ?? '',
+            'mailTo'             => $raw['mail']['to'] ?? '',
+            'mailPassConfigured' => trim((string) ($raw['mail']['smtp_pass'] ?? '')) !== '',
         ];
     }
 
@@ -1689,6 +1816,55 @@ final class Connector
         }
         $aiSection['write_mode'] = $aiWriteMode;
 
+        // Spracheingabe (Pro-Dienst). Der Schlüssel ist ein Geheimnis: ein leeres
+        // Feld lässt den bestehenden unverändert. Die URL ist die Basis-Adresse
+        // des Dienstes (der Endpunkt wird beim Aufruf angehängt); fehlt sie,
+        // gilt der Standard.
+        $speechUrl = self::cleanConfigValue($request['speechUrl'] ?? '', 'speechUrl', false);
+        if ($speechUrl === '') {
+            $speechUrl = 'https://api.hugocms.com/';
+        }
+        $speechKeyNew = self::cleanConfigValue($request['speechKey'] ?? '', 'speechKey', false);
+        $existingServices = Config::raw($this->configPath)['services'] ?? [];
+        $speechKey = $speechKeyNew !== '' ? $speechKeyNew : trim((string) ($existingServices['speech_key'] ?? ''));
+
+        // E-Mail-Versand (Gesundheitscheck). Das SMTP-Passwort ist ein Geheimnis:
+        // ein leeres Feld lässt das bestehende unverändert. Die Sektion wird nur
+        // geschrieben, wenn Server, Absender und Empfänger gesetzt sind — sonst
+        // ist der Versand aus. Nutzer/Passwort nur bei gesetztem Nutzer (sonst
+        // keine Authentifizierung, offenes Relay).
+        $mailHost = self::cleanConfigValue($request['mailHost'] ?? '', 'mailHost', false);
+        $mailFrom = self::cleanConfigValue($request['mailFrom'] ?? '', 'mailFrom', false);
+        $mailTo   = self::cleanConfigValue($request['mailTo'] ?? '', 'mailTo', false);
+        $mailUser = self::cleanConfigValue($request['mailUser'] ?? '', 'mailUser', false);
+        $mailSecurity = strtolower(trim((string) ($request['mailSecurity'] ?? 'tls')));
+        if (!in_array($mailSecurity, self::MAIL_SECURITIES, true)) {
+            $mailSecurity = 'tls';
+        }
+        $mailPort = (int) ($request['mailPort'] ?? 0);
+        $mailPassNew = self::cleanConfigValue($request['mailPass'] ?? '', 'mailPass', false);
+        $existingMail = Config::raw($this->configPath)['mail'] ?? [];
+        $mailPass = $mailPassNew !== '' ? $mailPassNew : trim((string) ($existingMail['smtp_pass'] ?? ''));
+
+        $mailSection = null;
+        if ($mailHost !== '' && $mailFrom !== '' && $mailTo !== '') {
+            $mailSection = [
+                'smtp_host'     => $mailHost,
+                'smtp_security' => $mailSecurity,
+                'from'          => $mailFrom,
+                'to'            => $mailTo,
+            ];
+            if ($mailPort > 0) {
+                $mailSection['smtp_port'] = (string) $mailPort;
+            }
+            if ($mailUser !== '') {
+                $mailSection['smtp_user'] = $mailUser;
+                if ($mailPass !== '') {
+                    $mailSection['smtp_pass'] = $mailPass;
+                }
+            }
+        }
+
         Config::updateSections($this->configPath, [
             'session' => ['path' => $sessionPath],
             'log'     => ['file' => $logFile, 'level' => $logLevel],
@@ -1696,6 +1872,10 @@ final class Connector
             'hugo'    => $hugoBin === '' ? null : ['bin' => $hugoBin],
             // Ohne API-Schlüssel keine [ai]-Sektion (Assistent aus).
             'ai'      => $apiKey === '' ? null : $aiSection,
+            // Ohne Schlüssel keine [services]-Sektion (Spracheingabe aus).
+            'services' => $speechKey === '' ? null : ['speech_key' => $speechKey, 'speech_url' => $speechUrl],
+            // Ohne Server/Absender/Empfänger keine [mail]-Sektion (Versand aus).
+            'mail'    => $mailSection,
         ]);
         $this->logger->info('Konfiguration aktualisiert (reconfigure).');
 
