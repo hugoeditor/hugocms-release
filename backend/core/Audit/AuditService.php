@@ -24,10 +24,15 @@ final class AuditService
     /** Erlaubtes Format einer Lauf-ID (Zeitstempel, ggf. mit Eindeutigkeitssuffix). */
     private const string ID_PATTERN = '/^[0-9]{8}-[0-9]{6}(?:-[a-z0-9]{1,8})?$/';
 
+    /**
+     * @param list<string> $excludePrefixes Zusätzliche public-relative Präfixe
+     *        aus der [seo_report]-Sektion, die vom Audit übersprungen werden.
+     */
     public function __construct(
         private readonly string $publicDir,
         private readonly string $sourceDir,
         private readonly string $storageDir,
+        private readonly array $excludePrefixes = [],
     ) {
     }
 
@@ -43,7 +48,12 @@ final class AuditService
             throw new ApiException('ECONFIG', 409, 'AUDIT-NO-BUILD-OUTPUT');
         }
 
-        $report = (new AuditRunner($this->publicDir, $this->sourceDir, self::detectContentDir($this->sourceDir)))->run();
+        $report = (new AuditRunner(
+            $this->publicDir,
+            $this->sourceDir,
+            self::detectContentDir($this->sourceDir),
+            $this->excludePrefixes,
+        ))->run();
         $report['id'] = $this->freshId();
 
         $this->persist($report);
@@ -121,6 +131,27 @@ final class AuditService
         @unlink($path);
 
         return ['deleted' => $id];
+    }
+
+    /**
+     * Löscht alle gespeicherten Läufe bis auf den jüngsten. Aufräumhilfe, um den
+     * Verlauf ohne Einzellöschungen zu leeren; der zuletzt erzeugte Bericht (für
+     * Vergleiche der wichtigste) bleibt erhalten.
+     *
+     * @return array{deleted: int, kept: ?string}
+     */
+    public function deleteAllButLatest(): array
+    {
+        $files = $this->files(); // neueste zuerst
+        $kept = $files === [] ? null : basename($files[0], '.json');
+        $deleted = 0;
+        foreach (array_slice($files, 1) as $old) {
+            if (@unlink($old)) {
+                ++$deleted;
+            }
+        }
+
+        return ['deleted' => $deleted, 'kept' => $kept];
     }
 
     // --- Intern ------------------------------------------------------------
