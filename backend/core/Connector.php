@@ -380,6 +380,7 @@ final class Connector
                 'speech' => $this->cmdSpeech($request),
                 'speechverify' => $this->cmdSpeechVerify($request),
                 'pagespeed' => $this->cmdPageSpeed($request),
+                'pagespeedlatest' => $this->cmdPageSpeedLatest(),
                 'config' => $this->cmdConfig(),
                 'reconfigure' => $this->cmdReconfigure($request),
                 'setupdatelastmod' => $this->cmdSetUpdateLastmod($request),
@@ -1551,9 +1552,53 @@ final class Connector
         $result = (new PageSpeedClient($this->services['pagespeedKey']))
             ->run($url, $strategy, PageSpeedClient::CATEGORIES);
 
+        // Zeitpunkt der Messung (Serverzeit, UTC) für die Anzeige „zuletzt
+        // gemessen" und das jüngste Ergebnis je Webseite merken.
+        $result['measuredAt'] = gmdate('c');
+        $this->persistPageSpeed($result);
+
         $this->logger->info(sprintf('PageSpeed-Check (%s) für %s.', $strategy, $url));
 
         return $result;
+    }
+
+    /**
+     * pagespeedlatest — liefert die zuletzt gespeicherten PageSpeed-Ergebnisse
+     * dieser Webseite je Strategie (mobil/desktop; jeweils null, wenn noch keine
+     * Messung vorliegt), damit das Panel sie nach dem Öffnen anzeigen und der
+     * Nutzer per Umschalter zwischen beiden wechseln kann. Kein Verlauf: je
+     * Strategie wird nur das jüngste Ergebnis vorgehalten.
+     *
+     * @return array{mobile: ?array<string, mixed>, desktop: ?array<string, mixed>}
+     */
+    private function cmdPageSpeedLatest(): array
+    {
+        $this->requireAuth();
+        $this->requirePro();
+        if ($this->hugo === null) {
+            throw new ApiException('ECONFIG', 409, 'AUDIT-NO-PROJECT');
+        }
+
+        return [
+            'mobile' => $this->readPageSpeed('mobile'),
+            'desktop' => $this->readPageSpeed('desktop'),
+        ];
+    }
+
+    /**
+     * Liest das gespeicherte PageSpeed-Ergebnis einer Strategie oder null.
+     *
+     * @return ?array<string, mixed>
+     */
+    private function readPageSpeed(string $strategy): ?array
+    {
+        $path = $this->pagespeedStorePath($strategy);
+        if ($path === null || !is_file($path)) {
+            return null;
+        }
+        $data = json_decode((string) file_get_contents($path), true);
+
+        return is_array($data) ? $data : null;
     }
 
     /** Prüft, ob $url eine absolute http(s)-Adresse mit Host ist. */
@@ -1563,6 +1608,48 @@ final class Connector
         return is_array($parts)
             && in_array(strtolower($parts['scheme'] ?? ''), ['http', 'https'], true)
             && ($parts['host'] ?? '') !== '';
+    }
+
+    /**
+     * Speicherpfad des jüngsten PageSpeed-Ergebnisses dieser Webseite JE
+     * STRATEGIE — je Projekt getrennt unter
+     * var/pagespeed/<hash(source)>-<strategy>.json (wie das Audit seine
+     * Berichte). So bleiben Mobil- und Desktop-Bericht nebeneinander erhalten.
+     * null, wenn kein Hugo-Projekt vorliegt.
+     */
+    private function pagespeedStorePath(string $strategy): ?string
+    {
+        if ($this->hugo === null) {
+            return null;
+        }
+        $strategy = $strategy === 'desktop' ? 'desktop' : 'mobile';
+
+        return __DIR__ . '/../var/pagespeed/' . sha1((string) $this->hugo['source']) . '-' . $strategy . '.json';
+    }
+
+    /**
+     * Legt das jüngste PageSpeed-Ergebnis der jeweiligen Strategie ab
+     * (überschreibt das vorherige derselben Strategie). Best effort: ein
+     * fehlgeschlagener Schreibvorgang bricht die Messung NICHT ab — der Benutzer
+     * hat sein Ergebnis bereits; nur das Merken misslingt.
+     *
+     * @param array<string, mixed> $result
+     */
+    private function persistPageSpeed(array $result): void
+    {
+        $path = $this->pagespeedStorePath((string) ($result['strategy'] ?? 'mobile'));
+        if ($path === null) {
+            return;
+        }
+        $dir = dirname($path);
+        if (!is_dir($dir) && !@mkdir($dir, 0775, true) && !is_dir($dir)) {
+            $this->logger->warning('PageSpeed-Ergebnis konnte nicht abgelegt werden (Verzeichnis).');
+            return;
+        }
+        $json = json_encode($result, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+        if ($json === false || @file_put_contents($path, $json, LOCK_EX) === false) {
+            $this->logger->warning('PageSpeed-Ergebnis konnte nicht abgelegt werden (Schreiben).');
+        }
     }
 
     /**
