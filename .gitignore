@@ -7,3 +7,10 @@ bin/hugo/
 # läuft oder das Skript einmal aussetzt.
 *.ini
 *.bak
+
+# Werkzeugkonfiguration der Entwicklungsumgebung. Sie entsteht, sobald hier
+# Claude Code läuft, und wird vom Packaging nicht entfernt — ohne diese Regel
+# nähme das `git add -A` in Schritt 6 sie auf. `.mcp.json` enthält Zugangsdaten
+# zu MCP-Servern und darf dieses öffentliche Repo nie erreichen.
+.claude/
+.mcp.json
