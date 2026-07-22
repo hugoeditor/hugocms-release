@@ -14,3 +14,9 @@ bin/hugo/
 # zu MCP-Servern und darf dieses öffentliche Repo nie erreichen.
 .claude/
 .mcp.json
+
+# Log- und temporäre Dateien, die von der Instanz erzeugt werden. Sie werden
+# vom Packaging entfernt, falls sie hier entstehen. Sie werden nicht versioniert,
+# weil sie nicht für die Reproduktion der Instanz relevant sind.
+backend/log/
+backend/var/
