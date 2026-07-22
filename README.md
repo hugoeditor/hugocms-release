@@ -8,6 +8,12 @@ Knopf veröffentlicht die fertige Seite mit Hugo.
 Dieses Repository ist das **fertig gebaute Auslieferungspaket**. Es wird auf den
 Server geladen und dort eingerichtet — ein Build (Node.js, npm) ist nicht nötig.
 
+> **Hinweis: Rolling Release.** HugoCMS erscheint fortlaufend, ohne feste
+> Versionssprünge. Hier liegt jeweils die getestete und freigegebene Fassung —
+> fertig gebaut und direkt einsatzfähig. Der Quellcode und alles, was zum
+> Entwickeln der App und des Backends gebraucht wird, liegt im Repo
+> [hugocms](https://github.com/hugoeditor/hugocms).
+
 **Funktionen im Überblick**
 
 - Dateimanager: durchsuchen, anlegen, umbenennen, kopieren, verschieben,
