@@ -1,273 +1,203 @@
-# HugoCMS – Management für statisch generierte Webseiten
+# HugoCMS
 
-Ein webbasiertes Managementsystem, in dem die Inhalte einer Webseite erstellt,
-geprüft und veröffentlicht werden — ohne Kommandozeile, direkt im Browser. Der
-Schwerpunkt liegt auf **Suchmaschinen-Optimierung**: ein regelbasierter
-SEO-Check untersucht die gebaute Webseite und erklärt jeden einzelnen Fund, und
-die **eingebaute KI** bewertet die Inhalte, verbessert sie auf Wunsch direkt und
-steht darüber hinaus als Assistent für das ganze Projekt bereit.
+### Das erste CMS, dem du einfach sagst, was zu tun ist.
 
-Erzeugt wird die Webseite von [Hugo](https://gohugo.io) — einem
-Webseitengenerator, der aus Markdown-Dateien statische Seiten baut. Ein Knopf in
-der Oberfläche stößt diesen Bau an. Eine Installation verwaltet **mehrere
-Webseiten** pro Hosting; welche Verzeichnisse einer Webseite zugänglich sind,
-legt das Einrichtungs-Skript je Webseite fest.
+> ### 🗣️ „Ändere die Öffnungszeiten auf 9:00 bis 23:00 Uhr."
 
-Dieses Repository ist das **fertig gebaute Auslieferungspaket**. Es wird auf den
-Server geladen und dort eingerichtet — ein Build (Node.js, npm) ist nicht nötig.
+Du sagst es in normalen Sätzen — HugoCMS erledigt es: findet die richtige Stelle,
+ändert sie, fertig. Kein Suchen im Menü, kein Ausfüllen von Feldern, kein
+Handbuch. Und veröffentlicht wird mit einem Knopf: eine Seite, die niemand hacken
+kann und die in Millisekunden lädt.
 
-> **Hinweis: Rolling Release.** HugoCMS erscheint fortlaufend, ohne feste
-> Versionssprünge. Hier liegt jeweils die getestete und freigegebene Fassung —
-> fertig gebaut und direkt einsatzfähig. Der Quellcode und alles, was zum
-> Entwickeln der App und des Backends gebraucht wird, liegt im Repo
-> [hugocms](https://github.com/hugoeditor/hugocms).
+Kein Datenbank-Server. Keine Plugin-Updates am Wochenende. Keine gehackte Seite am Montag.
+HugoCMS gibt dir die bequeme Redaktion, die du von WordPress kennst — und darunter
+die Geschwindigkeit und Sicherheit einer statischen [Hugo](https://gohugo.io)-Seite.
 
-**Funktionen im Überblick**
+[![Mit der Seite reden](https://img.shields.io/badge/neu-mit%20deiner%20Seite%20reden-8a2be2)](#-sag-deiner-seite-was-sie-tun-soll)
+[![PHP 8.1+](https://img.shields.io/badge/PHP-8.1%2B-777bb4)](https://www.php.net)
+[![Hugo extended](https://img.shields.io/badge/l%C3%A4uft%20auf-Hugo-ff4088)](https://gohugo.io)
+[![Kein Build](https://img.shields.io/badge/Installation-ohne%20Node%2Fnpm-2ea44f)](#in-drei-minuten-live)
+[![Rolling Release](https://img.shields.io/badge/Updates-rolling-blue)](#immer-aktuell)
 
-- Optionaler **KI-Assistent** (Claude), der Hugo kennt und direkt auf den
-  Inhalten der Webseite arbeitet
-- Optionale **Pro-Version**: **SEO-Check** der gebauten Webseite (regelbasierte
-  Prüfungen mit Fundliste je Regel und Erklärung), **Content-Qualität** (KI-Urteil
-  je Inhaltsdatei samt direkter KI-Verbesserung, auch zeitgesteuert per Cron)
-  sowie Git-Versionierung (Status, Verlauf, Commit, Push)
-- **Freigabe-Warteschlange**: Änderungen erst als Entwurf sammeln, mit Diff
-  prüfen und sofort oder terminiert veröffentlichen
-- Text- und visueller Markdown-Editor mit Schutz des Front Matter
-- Veröffentlichen-Knopf: ruft Hugo für die aufgerufene Webseite auf
-- Dateiverwaltung: durchsuchen, anlegen, umbenennen, kopieren, verschieben,
-  löschen (Papierkorb), Mehrfachauswahl, Kontextmenü, rekursive Namenssuche
-- Hochladen (auch per Ziehen-und-Ablegen), Herunterladen, Bildvorschauen und
-  Bildbetrachter
-- Anmeldedaten und Einstellungen lassen sich im laufenden Betrieb über die
-  Oberfläche ändern
+> _Hier gehört ein Screenshot oder ein kurzes GIF hin — die Redaktionsoberfläche mit
+> dem Veröffentlichen-Knopf. Ein Bild verkauft dieses Produkt in zwei Sekunden._
+
+---
+
+## Warum HugoCMS?
+
+Du willst Inhalte pflegen — nicht einen Server administrieren.
+
+WordPress hat dir das nie ganz gegeben: eine Datenbank, die kippt. Plugins, die
+sich streiten. Sicherheitslücken, die dich zum Update zwingen, bevor jemand die
+Seite übernimmt. Ladezeiten, die mit jedem Plugin schlechter werden. Hosting, das
+mehr kostet, je mehr Besucher du hast.
+
+**Statische Seiten lösen das alles — nur war Redaktion bisher etwas für die
+Kommandozeile.** Genau diese Lücke schließt HugoCMS. Du schreibst im Browser,
+drückst einen Knopf, und Hugo baut deine komplette Seite in Sekunden neu. Was
+online geht, ist reines HTML: nichts, was ein Angreifer ausführen könnte, nichts,
+das eine Datenbank abfragen muss.
+
+| | WordPress | **HugoCMS** |
+|---|---|---|
+| **Was liegt online** | PHP + Datenbank, live bei jedem Klick | fertiges HTML, vorab gebaut |
+| **Angriffsfläche** | Core, Themes, Dutzende Plugins | keine — es läuft nichts auf dem Server |
+| **Ladezeit** | „kommt drauf an" | Millisekunden, weltweit cachebar |
+| **Hosting** | PHP-Datenbank-Server nötig | einfachster Speicherplatz genügt |
+| **Pflichtupdates** | ständig, sicherheitskritisch | keine — statisches HTML altert nicht |
+| **Backup** | Datenbank-Dump + Dateien | ein Ordner mit Textdateien |
+
+Für dich als Agentur oder Freelancer heißt das: **eine Installation verwaltet
+beliebig viele Kundenseiten** — ein Login, saubere Trennung, ein Skriptaufruf pro
+neuer Seite.
+
+## Das kann HugoCMS
+
+### 🗣️ Sag deiner Seite, was sie tun soll
+
+**Das ist der Teil, den kein anderes CMS hat.** Hinterlege einen
+Anthropic-Schlüssel, und du bedienst deine Seite in normalen Sätzen:
+
+> „Ändere die Öffnungszeiten auf 9:00 bis 23:00 Uhr."
+> „Schreib einen Blogbeitrag über unser neues Winterangebot."
+> „Übersetz die Startseite ins Englische."
+
+Der Claude-Assistent kennt Hugo und arbeitet direkt in den Dateien deiner Seite —
+er findet die richtige Stelle, ändert sie und zeigt dir das Ergebnis. Alles im
+Rahmen genau derselben Grenzen wie du selbst. Du entscheidest, ob er nur liest,
+jede Änderung vorher vorlegt oder direkt loslegt; pro Seite kannst du ihm sogar
+einen eigenen Stil-Leitfaden mitgeben („Front Matter immer als YAML", „Inhalte
+auf Deutsch"). _(optional — braucht einen Anthropic-API-Schlüssel)_
+
+**Redaktion, die sich anfühlt wie ein Textprogramm.**
+Lieber selbst tippen? Markdown lässt sich visuell bearbeiten — Überschriften,
+Links, Bilder, ohne Syntax lernen zu müssen. Das Front Matter (der technische Kopf
+jeder Seite) bleibt dabei geschützt, damit nichts kaputtgeht. Mehrere Personen?
+HugoCMS bewahrt dich davor, versehentlich die Änderung eines anderen zu
+überschreiben.
+
+**Veröffentlichen ist ein Knopfdruck.**
+Ein Klick baut die ganze Seite neu und stellt sie live. Hugos Ergebnis —
+Statistik oder Fehlermeldung — erscheint sofort. Kein SSH, kein Deploy-Skript,
+kein Warten.
+
+**Versionsgeschichte wie bei den Profis.** _(Pro)_
+Volle Git-Versionierung pro Seite: Was hat sich geändert, wer, wann — Verlauf,
+Diff, Commit, Push, alles über einen Knopf. Jede Veröffentlichung wird
+nachvollziehbar, jeder Stand wiederherstellbar.
+
+**Und der ganze Redaktionsalltag drumherum.**
+Inhalte, Vorlagen und Medien getrennt und aufgeräumt. Hochladen per
+Ziehen-und-Ablegen, Bildvorschauen, Papierkorb mit Wiederherstellung, Suche über
+die ganze Seite. Anmeldung und Einstellungen jederzeit im Browser änderbar.
+
+## In drei Minuten live
+
+HugoCMS ist das **fertig gebaute Auslieferungspaket** — auf den Server laden,
+einrichten, fertig. Kein Node, kein npm, kein Build.
+
+```bash
+# 1. Paket außerhalb des Webroots ablegen
+git clone <DIESE-REPO-URL> /pfad/zu/hugocms-release
+cd /pfad/zu/hugocms-release
+
+# 2. Seite einrichten:  bin/install.sh <host> <hugo-publish-ordner>
+bin/install.sh kunde-a.example.com /var/www/kunde-a/public
+
+# 3. Im Browser öffnen und Konto anlegen
+#    → https://kunde-a.example.com/edit/
+```
+
+Beim ersten Aufruf legst du im Browser Anmeldename und Passwort fest — danach bist
+du drin. Jede weitere Seite: `bin/install.sh` erneut aufrufen. Das war's.
+
+> **Läuft, wo andere CMS nicht laufen.** Keine Symlinks, keine Sonderrechte,
+> keine Datenbank — HugoCMS funktioniert sogar auf einfachem Shared Hosting
+> (z. B. Hetzner Webhosting). Hugo selbst? Lädt das Einrichtungs-Skript bei Bedarf
+> automatisch in der passenden Version.
 
 ## Systemvoraussetzungen
 
-- **PHP 8.1 oder neuer** als Webserver-Modul oder über PHP-FPM
-  - Erweiterung `fileinfo` (üblicherweise vorhanden)
-  - Erweiterung `gd` empfohlen — für verkleinerte Bildvorschauen; ohne `gd`
-    wird das Originalbild ausgeliefert
-- **Apache oder Nginx** (oder ein anderer Webserver, der PHP ausführt).
-  Symlinks sind **nicht** erforderlich — die Einrichtung kommt ohne aus und
-  läuft daher auch auf einfachem Shared Hosting (z. B. Hetzner Webhosting).
-- **SSH-Zugang** zum Server, um die Einrichtungs-Skripte auszuführen
-- **Hugo** wird nicht vorausgesetzt: Das Einrichtungs-Skript lädt bei Bedarf die
-  passende Hugo-Version (Variante *extended*) selbst herunter.
-- Optional für den **KI-Assistenten** sowie für die KI-gestützte
-  Content-Qualität: ein Anthropic-API-Schlüssel.
-- Optional für die **Pro-Version**: ein Lizenzschlüssel je Webseite; für die
-  Git-Versionierung zusätzlich `git` auf dem Server und ein Hugo-Projekt, das ein
-  Git-Repository ist. Der SEO-Check kommt ohne beides aus — er wertet die
-  gebaute Webseite mit Bordmitteln aus.
+| | |
+|---|---|
+| **PHP** | 8.1+, als Webserver-Modul oder über PHP-FPM |
+| **Erweiterungen** | `fileinfo` (meist vorhanden); `gd` empfohlen für verkleinerte Bildvorschauen |
+| **Webserver** | Apache, Nginx oder anderer PHP-fähiger Server — **ohne Symlinks**, läuft auf Shared Hosting |
+| **Zugang** | SSH zum einmaligen Einrichten; dort die üblichen Werkzeuge (`bash`, `git`, `curl`/`wget`, `sha256sum`, `tar`) |
+| **Hugo** | wird bei Bedarf automatisch heruntergeladen (*extended*) |
+| **Optional — KI** | Anthropic-API-Schlüssel |
+| **Optional — Pro** | `git` auf dem Server; das Hugo-Projekt ist ein Git-Repository |
 
-Auf dem Server, der die Einrichtung ausführt, werden außerdem die üblichen
-Kommandozeilenwerkzeuge erwartet (`bash`, `git`, `curl` bzw. `wget`,
-`sha256sum`, `tar`).
-
-## Installation
-
-### 1. Paket auf den Server holen
-
-Das Repository an einen Ort **außerhalb des Webroots** klonen — der PHP-Code
-soll nicht direkt über das Web erreichbar sein:
-
-```bash
-git clone <DIESE-REPO-URL> /pfad/zu/hugocms-release
-cd /pfad/zu/hugocms-release
-```
-
-Das Repository darf an beliebiger Stelle liegen; die Skripte finden ihre eigene
-Wurzel selbst.
-
-### 2. Eine Webseite einrichten
-
-Für jede Hugo-Webseite das Einrichtungs-Skript mit Hostname und
-Veröffentlichungsverzeichnis aufrufen:
+## So richtest du eine Seite ein
 
 ```bash
 bin/install.sh <host> <hugo-publish-ordner>
-#   z. B.
+# z. B.
 bin/install.sh kunde-a.example.com /var/www/kunde-a/public
 ```
 
-- `<host>` ist der reine Hostname der Webseite, so wie der Browser ihn sendet —
-  ohne `https://`, ohne Port, ohne Pfad.
-- `<hugo-publish-ordner>` ist das Verzeichnis, in das Hugo die fertige Webseite
-  schreibt. Dessen **Elternverzeichnis** gilt als Hugo-Projektverzeichnis;
-  dort werden `content/`, `layouts/` und `static/` erwartet bzw. angelegt.
+- **`<host>`** — der reine Hostname, wie der Browser ihn sendet: ohne `https://`,
+  ohne Port, ohne Pfad.
+- **`<hugo-publish-ordner>`** — das Verzeichnis, in das Hugo die fertige Seite
+  schreibt. Dessen **Elternverzeichnis** ist das Hugo-Projekt; dort liegen bzw.
+  entstehen `content/`, `layouts/` und `static/`.
 
-Das Skript erledigt in einem Durchgang:
+Das Skript erledigt alles in einem Durchgang:
 
-1. **Hugo bereitstellen** — fehlt das Programm noch, wird es heruntergeladen und
-   die Prüfsumme verglichen.
-2. **Zugänge anlegen** — eine Konfiguration für diese Webseite mit Zugriff auf
-   das gesamte Projektverzeichnis sowie die bequemen Direktzugänge *Inhalt*
-   (`content/`), *Vorlagen* (`layouts/`) und *Medien* (`static/`).
-3. **Oberfläche ausliefern** — die Editor-Oberfläche unter `/edit/` und den
-   API-Endpunkt unter `/cms-api/` (ohne Symlinks; der PHP-Code bleibt im
-   Release-Repo).
+1. **Hugo bereitstellen** — fehlt es, wird es geladen und die Prüfsumme geprüft.
+2. **Zugänge anlegen** — für diese Seite: das ganze Projekt sowie die
+   Direktzugänge *Inhalt* (`content/`), *Vorlagen* (`layouts/`) und *Medien*
+   (`static/`).
+3. **Oberfläche ausliefern** — Redaktion unter `/edit/`, API unter `/cms-api/`.
+   Ohne Symlinks; der PHP-Code bleibt sicher im Release-Repo.
 
-Anschließend ist die Webseite unter **`https://<host>/edit/`** erreichbar.
+Danach ist die Seite unter **`https://<host>/edit/`** erreichbar. Beim ersten
+Aufruf legst du dein Konto an.
 
-### 3. Ersteinrichtung im Browser
+> **Ein Login für alles.** Anmeldename und Passwort gelten installationsweit —
+> alle Seiten teilen sich das Backend. Getrennt bleiben nur die Datei-Zugänge je
+> Seite. Ideal, um viele Kundenseiten aus einer Hand zu betreuen.
 
-Beim ersten Aufruf von `https://<host>/edit/` blendet HugoCMS ein
-**Einrichtungs-Formular** ein (es gibt noch keine Konfiguration und kein
-Konto). Dort werden Anmeldename und Passwort festgelegt; danach ist man direkt
-angemeldet. Ein Passwort-Hash muss nicht von Hand erzeugt werden — das übernimmt
-das Formular.
+<a name="immer-aktuell"></a>
+## Immer aktuell
 
-Der **Anmeldename und das Passwort gelten für die gesamte Installation** (alle
-Webseiten teilen sich das Backend und damit die Anmeldung). Voneinander
-unabhängig sind nur die Zugänge je Webseite.
-
-### Weitere Webseiten hinzufügen
-
-Für jede zusätzliche Webseite `bin/install.sh` erneut mit deren Hostnamen und
-Publish-Ordner aufrufen. Die Anmeldung gilt installationsweit; lediglich die
-Zugänge der jeweiligen Webseite kommen hinzu.
-
-### Aktualisieren
-
-Nach einer neuen Version genügt im Release-Repo:
+HugoCMS ist ein **Rolling Release** — fortlaufende Verbesserungen, keine
+Versionssprünge. Aktualisieren geht in einer Zeile:
 
 ```bash
-bin/update.sh
+bin/update.sh              # git pull + Oberfläche aller Seiten neu ausliefern
+bin/update.sh --no-pull    # nur ausliefern
+bin/update.sh --dry-run    # nur anzeigen, was geschähe
 ```
 
-Das Skript holt den neuen Stand (`git pull`) und liefert die Oberfläche für
-**alle** eingerichteten Webseiten frisch aus. Das Backend ist nach dem `git
-pull` bereits aktuell; `update.sh` erneuert nur die kopierten Oberflächen.
+## Sicher aus Prinzip
 
-- `bin/update.sh --no-pull` — nur ausliefern, ohne `git pull`
-- `bin/update.sh --dry-run` — nur anzeigen, was geschähe
-
-## Bedienung
-
-### Anmelden
-
-Webseite unter `https://<host>/edit/` öffnen und mit den bei der Einrichtung
-festgelegten Daten anmelden. Eine Anmeldung bleibt standardmäßig 8 Stunden bei
-Inaktivität gültig; jede Aktion frischt das Fenster auf.
-
-### Dateien verwalten
-
-Die linke Spalte zeigt die **Zugänge** (Inhalt, Vorlagen, Medien, Projekt) der
-Webseite. Im Hauptbereich lassen sich Verzeichnisse öffnen, Dateien und Ordner
-anlegen, umbenennen, kopieren, verschieben und löschen. Gelöschtes landet im
-**Papierkorb** und kann wiederhergestellt oder endgültig entfernt werden.
-Dateien lassen sich per Ziehen-und-Ablegen hochladen und einzeln herunterladen;
-Bilder werden als Vorschau und im Betrachter angezeigt.
-
-### Bearbeiten
-
-Textdateien öffnen sich im Editor. Markdown-Dateien können wahlweise visuell
-bearbeitet werden, wobei das **Front Matter** (der Kopfbereich mit den
-Metadaten) geschützt bleibt. Beim Speichern schützt HugoCMS vor dem versehent-
-lichen Überschreiben einer zwischenzeitlich geänderten Datei.
-
-### Veröffentlichen
-
-Ein **Veröffentlichen-Knopf** in der Titelleiste ruft Hugo für die aufgerufene
-Webseite auf und erzeugt die fertige Seite. Eine offene, ungespeicherte Datei
-wird vorher automatisch gesichert. Die Ausgabe von Hugo (Statistik bzw.
-Fehlermeldungen) erscheint anschließend in einem Dialog. Der Knopf erscheint
-nur, wenn Hugo eingerichtet ist (das Einrichtungs-Skript erledigt das).
-
-### KI-Assistent (optional)
-
-Ist ein Anthropic-API-Schlüssel hinterlegt, erscheint ein **Roboter-Knopf**, der
-einen Chat öffnet. Der Assistent kennt Hugo und arbeitet direkt auf den Dateien
-der aufgerufenen Webseite — im Rahmen derselben Grenzen wie die Oberfläche. Er
-kennt drei Schreibmodi:
-
-| Modus      | Verhalten                                                   |
-|------------|-------------------------------------------------------------|
-| `readonly` | nur lesen                                                   |
-| `confirm`  | zeigt jede Schreibaktion vor der Ausführung an (Standard)   |
-| `auto`     | führt Schreibaktionen direkt aus                            |
-
-Den Schlüssel, das Modell und den Schreibmodus trägt man bei der Einrichtung im
-Browser ein oder später über das Zahnrad in der Titelleiste. Jede Webseite kann
-zusätzlich eine versteckte Datei `.hugocms-assistant.md` im Wurzelverzeichnis
-eines Zugangs hinterlegen, deren Inhalt der Assistent als vorrangige Anweisung
-übernimmt (z. B. „Front Matter immer als YAML", „Inhalte auf Deutsch").
-
-### Freigabe statt sofort live
-
-Nicht jede Änderung muss unmittelbar online gehen. Änderungen können als
-**Entwurf** in einer Warteschlange gesammelt werden — die veröffentlichte Datei
-bleibt dabei unangetastet. Jeder Entwurf wird mit einem zeilenweisen Vergleich
-gegen den Live-Stand angezeigt und dann freigegeben (sofort oder zu einem
-Termin) oder verworfen. Bei einer terminierten Freigabe bleibt die bisherige
-Fassung bis zum Termin veröffentlicht und wird dann ersetzt.
-
-### Pro-Version: SEO-Check und Content-Qualität (optional)
-
-Mit einem gültigen **Lizenzschlüssel** schaltet HugoCMS je Webseite die
-Optimierungs-Werkzeuge frei.
-
-**SEO-Check** untersucht die **gebaute** Webseite nach festen Regeln — fehlende
-oder doppelte Titel und Meta-Descriptions, Überschriften-Hierarchie, Bilder ohne
-`alt`, Canonical, Open Graph, defekte interne Links, URL-Struktur,
-`robots.txt`/Sitemap und weitere. Die Prüfung läuft ohne externe Dienste. Jeder
-Fund verweist auf eine ausführliche Erklärung der Regel und führt mit einem Klick
-zur betroffenen Quelldatei. Läufe werden aufbewahrt und lassen sich vergleichen.
-
-**Content-Qualität** bewertet ergänzend einzelne Inhaltsdateien per KI
-(Lesbarkeit, zu dünner Inhalt, Meta- und SEO-Felder) und liefert Punktzahl,
-Befunde und Vorschläge. Der Gesamt-Bericht einer Datei verbindet dieses Urteil
-mit den SEO-Funden derselben Datei. Auf dieser Grundlage überarbeitet der Knopf
-**„Mit KI verbessern"** die Datei direkt. Dafür ist ein Anthropic-API-Schlüssel
-nötig.
-
-### Pro-Version: Git-Versionierung (optional)
-
-Ebenfalls über den Lizenzschlüssel: Status, Commit-Verlauf, Diff, Commit, Push
-und das Zurücksetzen des Arbeitsbaums — alles über einen **Repository-Knopf** in
-der Titelleiste. Voraussetzung ist, dass das Hugo-Projektverzeichnis ein
-Git-Repository ist und für `push` die Zugangsdaten der Gegenstelle auf dem Server
-eingerichtet sind.
-
-Den Schlüssel über den **Lizenz-Knopf** in der Titelleiste einfügen und
-aktivieren. Die Lizenz gilt pro Webseite, ist an deren Domain gebunden und hat
-kein Ablaufdatum.
-
-### Einstellungen im laufenden Betrieb ändern
-
-- **Zahnrad** in der Titelleiste: Sitzungs- und Log-Einstellungen, Hugo-Programm
-  sowie der KI-Assistent (Schlüssel, Modell, Schreibmodus). Ein leeres
-  Schlüsselfeld lässt einen vorhandenen Schlüssel unverändert.
-- **Klick auf den Benutzernamen**: Anmeldename und Passwort ändern (zur
-  Bestätigung ist das aktuelle Passwort nötig; danach folgt eine Neuanmeldung).
-
-## Fehlersuche
-
-- **Die Anmeldung schlägt fehl oder es erscheint ein Hinweis zum
-  Sitzungsverzeichnis.** Das Verzeichnis `backend/var/sessions` muss für den
-  Webserver-Benutzer beschreibbar sein. HugoCMS meldet ein nicht beschreibbares
-  Verzeichnis vor dem Login im Klartext.
-- **HTTP 500.** Häufigste Ursache ist ein Zugangs-Pfad, der auf dem Server nicht
-  existiert oder nicht lesbar ist. Zur genaueren Diagnose die Log-Stufe (Zahnrad
-  → Log) vorübergehend auf `debug` setzen, die Aktion wiederholen und
-  `backend/log/hugocms.log` ansehen. Bleibt das Log leer, liegt der Fehler vor
-  dem PHP-Code (z. B. fehlende PHP-Erweiterung) — dann ins Server-Log schauen.
-- **Der Veröffentlichen-Knopf fehlt.** Hugo ist nicht eingerichtet. Das
-  Einrichtungs-Skript erneut ausführen bzw. den Hugo-Programmpfad im Zahnrad
-  prüfen.
-- **Nach einer Aktualisierung erscheint die alte Oberfläche.** `bin/update.sh`
-  ausführen, damit die kopierte Oberfläche aller Webseiten erneuert wird, und im
-  Browser den Zwischenspeicher leeren.
-
-## Sicherheitshinweise
-
-- Das Release-Repo **außerhalb des Webroots** belassen; nur `edit/` und
-  `cms-api/` werden in den öffentlichen Bereich ausgeliefert.
-- Jeder Zugang sperrt den Zugriff auf sein Verzeichnis ein; ein Ausbruch über
-  `..` ist nicht möglich.
-- Alle Datei-Operationen erfordern eine Anmeldung; Schreibaktionen sind zusätz-
-  lich gegen webseitenübergreifende Anfragen (CSRF) geschützt.
+- Der PHP-Code liegt **außerhalb des Webroots** — öffentlich sind nur `edit/` und
+  `cms-api/`.
+- Jeder Zugang ist auf sein Verzeichnis eingesperrt; ein Ausbruch über `..` ist
+  ausgeschlossen.
+- Jede Aktion verlangt eine Anmeldung; Schreibaktionen sind zusätzlich gegen
+  CSRF geschützt.
 - Geheimnisse (Passwort-Hash, API-Schlüssel) verlassen das Backend nie und
-  werden in Formularen nie angezeigt; ein leeres Feld bedeutet „unverändert".
-- Enthält die Konfiguration einen API-Schlüssel, die Datei mit restriktiven
-  Rechten (`0640`) schützen.
+  erscheinen in keinem Formular. Enthält die Konfiguration einen Schlüssel,
+  schütze die Datei mit `0640`.
+
+Und weil online nur statisches HTML liegt, gibt es schlicht **nichts, was ein
+Angreifer ausführen könnte** — die stärkste Sicherheitsmaßnahme ist die, die man
+gar nicht erst braucht.
+
+## Hilfe bei Startproblemen
+
+| Symptom | Abhilfe |
+|---|---|
+| **Anmeldung schlägt fehl / Hinweis zum Sitzungsverzeichnis** | `backend/var/sessions` muss für den Webserver-Benutzer beschreibbar sein — HugoCMS sagt das vor dem Login im Klartext. |
+| **HTTP 500** | Meist ein fehlender oder nicht lesbarer Zugangs-Pfad. Log-Stufe (Zahnrad → Log) auf `debug`, Aktion wiederholen, `backend/log/hugocms.log` lesen. Log leer? Dann Server-Log prüfen (z. B. fehlende PHP-Erweiterung). |
+| **Veröffentlichen-Knopf fehlt** | Hugo ist nicht eingerichtet — Skript erneut ausführen oder Hugo-Pfad im Zahnrad prüfen. |
+| **Alte Oberfläche nach Update** | `bin/update.sh` ausführen und Browser-Zwischenspeicher leeren. |
+
+---
+
+**Quellcode & Entwicklung:** [hugoeditor/hugocms](https://github.com/hugoeditor/hugocms) · **Angetrieben von:** [Hugo](https://gohugo.io)
+
+_HugoCMS — schreib deine Inhalte. Um den Rest kümmert sich der Knopf._
