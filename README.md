@@ -1,9 +1,17 @@
-# HugoCMS
+# HugoCMS – Management für statisch generierte Webseiten
 
-Webbasierter Dateimanager und Editor zum Pflegen von [Hugo](https://gohugo.io)-Webseiten —
-ohne Kommandozeile, direkt im Browser. Eine Installation verwaltet **mehrere
-Webseiten**; Inhalte und Vorlagen werden über die Oberfläche bearbeitet, und ein
-Knopf veröffentlicht die fertige Seite mit Hugo.
+Ein webbasiertes Managementsystem, in dem die Inhalte einer Webseite erstellt,
+geprüft und veröffentlicht werden — ohne Kommandozeile, direkt im Browser. Der
+Schwerpunkt liegt auf **Suchmaschinen-Optimierung**: ein regelbasierter
+SEO-Check untersucht die gebaute Webseite und erklärt jeden einzelnen Fund, und
+die **eingebaute KI** bewertet die Inhalte, verbessert sie auf Wunsch direkt und
+steht darüber hinaus als Assistent für das ganze Projekt bereit.
+
+Erzeugt wird die Webseite von [Hugo](https://gohugo.io) — einem
+Webseitengenerator, der aus Markdown-Dateien statische Seiten baut. Ein Knopf in
+der Oberfläche stößt diesen Bau an. Eine Installation verwaltet **mehrere
+Webseiten** pro Hosting; welche Verzeichnisse einer Webseite zugänglich sind,
+legt das Einrichtungs-Skript je Webseite fest.
 
 Dieses Repository ist das **fertig gebaute Auslieferungspaket**. Es wird auf den
 Server geladen und dort eingerichtet — ein Build (Node.js, npm) ist nicht nötig.
@@ -16,16 +24,20 @@ Server geladen und dort eingerichtet — ein Build (Node.js, npm) ist nicht nöt
 
 **Funktionen im Überblick**
 
-- Dateimanager: durchsuchen, anlegen, umbenennen, kopieren, verschieben,
-  löschen (Papierkorb), Mehrfachauswahl, Kontextmenü
-- Hochladen (auch per Ziehen-und-Ablegen), Herunterladen, Bildvorschauen und
-  Bildbetrachter
+- Optionaler **KI-Assistent** (Claude), der Hugo kennt und direkt auf den
+  Inhalten der Webseite arbeitet
+- Optionale **Pro-Version**: **SEO-Check** der gebauten Webseite (regelbasierte
+  Prüfungen mit Fundliste je Regel und Erklärung), **Content-Qualität** (KI-Urteil
+  je Inhaltsdatei samt direkter KI-Verbesserung, auch zeitgesteuert per Cron)
+  sowie Git-Versionierung (Status, Verlauf, Commit, Push)
+- **Freigabe-Warteschlange**: Änderungen erst als Entwurf sammeln, mit Diff
+  prüfen und sofort oder terminiert veröffentlichen
 - Text- und visueller Markdown-Editor mit Schutz des Front Matter
 - Veröffentlichen-Knopf: ruft Hugo für die aufgerufene Webseite auf
-- Rekursive Namenssuche
-- Optionaler **KI-Assistent** (Claude), der direkt auf den Dateien der Webseite
-  arbeitet
-- Optionale **Pro-Version** mit Git-Versionierung (Status, Verlauf, Commit, Push)
+- Dateiverwaltung: durchsuchen, anlegen, umbenennen, kopieren, verschieben,
+  löschen (Papierkorb), Mehrfachauswahl, Kontextmenü, rekursive Namenssuche
+- Hochladen (auch per Ziehen-und-Ablegen), Herunterladen, Bildvorschauen und
+  Bildbetrachter
 - Anmeldedaten und Einstellungen lassen sich im laufenden Betrieb über die
   Oberfläche ändern
 
@@ -41,9 +53,12 @@ Server geladen und dort eingerichtet — ein Build (Node.js, npm) ist nicht nöt
 - **SSH-Zugang** zum Server, um die Einrichtungs-Skripte auszuführen
 - **Hugo** wird nicht vorausgesetzt: Das Einrichtungs-Skript lädt bei Bedarf die
   passende Hugo-Version (Variante *extended*) selbst herunter.
-- Optional für die **Pro-Version**: `git` auf dem Server und ein Hugo-Projekt,
-  das ein Git-Repository ist.
-- Optional für den **KI-Assistenten**: ein Anthropic-API-Schlüssel.
+- Optional für den **KI-Assistenten** sowie für die KI-gestützte
+  Content-Qualität: ein Anthropic-API-Schlüssel.
+- Optional für die **Pro-Version**: ein Lizenzschlüssel je Webseite; für die
+  Git-Versionierung zusätzlich `git` auf dem Server und ein Hugo-Projekt, das ein
+  Git-Repository ist. Der SEO-Check kommt ohne beides aus — er wertet die
+  gebaute Webseite mit Bordmitteln aus.
 
 Auf dem Server, der die Einrichtung ausführt, werden außerdem die üblichen
 Kommandozeilenwerkzeuge erwartet (`bash`, `git`, `curl` bzw. `wget`,
@@ -178,12 +193,39 @@ zusätzlich eine versteckte Datei `.hugocms-assistant.md` im Wurzelverzeichnis
 eines Zugangs hinterlegen, deren Inhalt der Assistent als vorrangige Anweisung
 übernimmt (z. B. „Front Matter immer als YAML", „Inhalte auf Deutsch").
 
+### Freigabe statt sofort live
+
+Nicht jede Änderung muss unmittelbar online gehen. Änderungen können als
+**Entwurf** in einer Warteschlange gesammelt werden — die veröffentlichte Datei
+bleibt dabei unangetastet. Jeder Entwurf wird mit einem zeilenweisen Vergleich
+gegen den Live-Stand angezeigt und dann freigegeben (sofort oder zu einem
+Termin) oder verworfen. Bei einer terminierten Freigabe bleibt die bisherige
+Fassung bis zum Termin veröffentlicht und wird dann ersetzt.
+
+### Pro-Version: SEO-Check und Content-Qualität (optional)
+
+Mit einem gültigen **Lizenzschlüssel** schaltet HugoCMS je Webseite die
+Optimierungs-Werkzeuge frei.
+
+**SEO-Check** untersucht die **gebaute** Webseite nach festen Regeln — fehlende
+oder doppelte Titel und Meta-Descriptions, Überschriften-Hierarchie, Bilder ohne
+`alt`, Canonical, Open Graph, defekte interne Links, URL-Struktur,
+`robots.txt`/Sitemap und weitere. Die Prüfung läuft ohne externe Dienste. Jeder
+Fund verweist auf eine ausführliche Erklärung der Regel und führt mit einem Klick
+zur betroffenen Quelldatei. Läufe werden aufbewahrt und lassen sich vergleichen.
+
+**Content-Qualität** bewertet ergänzend einzelne Inhaltsdateien per KI
+(Lesbarkeit, zu dünner Inhalt, Meta- und SEO-Felder) und liefert Punktzahl,
+Befunde und Vorschläge. Der Gesamt-Bericht einer Datei verbindet dieses Urteil
+mit den SEO-Funden derselben Datei. Auf dieser Grundlage überarbeitet der Knopf
+**„Mit KI verbessern"** die Datei direkt. Dafür ist ein Anthropic-API-Schlüssel
+nötig.
+
 ### Pro-Version: Git-Versionierung (optional)
 
-Mit einem gültigen **Lizenzschlüssel** schaltet HugoCMS pro Webseite die
-Git-Versionierung frei: Status, Commit-Verlauf, Diff, Commit, Push und das
-Zurücksetzen des Arbeitsbaums — alles über einen **Repository-Knopf** in der
-Titelleiste. Voraussetzung ist, dass das Hugo-Projektverzeichnis ein
+Ebenfalls über den Lizenzschlüssel: Status, Commit-Verlauf, Diff, Commit, Push
+und das Zurücksetzen des Arbeitsbaums — alles über einen **Repository-Knopf** in
+der Titelleiste. Voraussetzung ist, dass das Hugo-Projektverzeichnis ein
 Git-Repository ist und für `push` die Zugangsdaten der Gegenstelle auf dem Server
 eingerichtet sind.
 
