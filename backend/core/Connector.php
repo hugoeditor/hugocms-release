@@ -74,7 +74,7 @@ final class Connector
      * models: in der INI hinterlegte Auswahlliste der Oberfläche (leer = die
      * fest verdrahtete Liste des Clients gilt).
      *
-     * @var array{apiKey: ?string, model: string, modelCron: string, modelAudit: string, writeMode: string, models: list<string>}
+     * @var array{apiKey: ?string, model: string, modelCron: string, modelAudit: string, writeMode: string, forceThinking: bool, forceThinkingCron: bool, models: list<string>}
      */
     private array $ai = [
         'apiKey' => null,
@@ -82,6 +82,8 @@ final class Connector
         'modelCron' => 'claude-opus-4-8',
         'modelAudit' => 'claude-opus-4-8',
         'writeMode' => 'confirm',
+        'forceThinking' => false,
+        'forceThinkingCron' => false,
         'models' => [],
     ];
 
@@ -132,6 +134,49 @@ final class Connector
      * @var array{excludePrefixes: list<string>, excludeFiles: list<string>}
      */
     private array $seoReport = ['excludePrefixes' => [], 'excludeFiles' => []];
+
+    /**
+     * Automatikmodus des Cron-Verbesserers aus der [improve]-Sektion der
+     * Mount-Konfiguration (pro Webseite). Ist `auto` an, terminiert der Cron
+     * jeden erzeugten Entwurf gleich selbst — zufällig verteilt im Tagesfenster,
+     * höchstens `perDay` Stück je Tag.
+     *
+     * @var array{auto: bool, windowStart: string, windowEnd: string, perDay: int, skipWeekends: bool}
+     */
+    private array $improve = ['auto' => false, 'windowStart' => '07:00', 'windowEnd' => '16:00', 'perDay' => 3, 'skipWeekends' => true];
+
+    /**
+     * Pausenschalter der drei Cron-Skripte aus der [cron]-Sektion der
+     * Mount-Konfiguration (pro Webseite). Ist ein Schalter an, tut das
+     * zugehörige CLI-Skript beim Start nichts — so lässt sich ein Cron-Job
+     * aussetzen, ohne die Crontab des Hosters zu ändern.
+     *
+     * @var array{pauseBuild: bool, pauseImprove: bool, pauseHealthcheck: bool}
+     */
+    private array $cronPause = ['pauseBuild' => false, 'pauseImprove' => false, 'pauseHealthcheck' => false];
+
+    /**
+     * Automatischer Commit rund um die zeitgesteuerte Veröffentlichung, aus der
+     * [git]-Sektion der Mount-Konfiguration (pro Webseite). Ist `autoCommit` an
+     * und das Quellverzeichnis ein Repository, committet der Cron nach dem
+     * Einspielen fälliger Freigaben mit `commitMessage` (+ Datum) und sichert
+     * VOR dem Build offene Änderungen mit `commitMessagePending` (+ Datum).
+     *
+     * @var array{autoCommit: bool, commitMessage: string, commitMessagePending: string}
+     */
+    private array $gitAuto = [
+        'autoCommit' => false,
+        'commitMessage' => MountConfig::GIT_COMMIT_MESSAGE_DEFAULT,
+        'commitMessagePending' => MountConfig::GIT_COMMIT_MESSAGE_PENDING_DEFAULT,
+    ];
+
+    /**
+     * Wie weit die automatische Terminierung nach einem freien Platz sucht.
+     * Bei kleiner Tagesmenge und großem Rückstau wandern Freigaben weit nach
+     * vorn; irgendwo muss die Suche enden, sonst liefe sie bei erschöpftem
+     * Kontingent endlos.
+     */
+    private const int AUTO_SCHEDULE_HORIZON_DAYS = 90;
 
     /**
      * Dasselbe aus der [seo_report]-Sektion der Mount-Konfiguration — nur für
@@ -327,6 +372,12 @@ final class Connector
         // Ausschlüsse des SEO-Berichts NUR für diese Webseite; sie ergänzen die
         // globalen aus der hugocms.ini (siehe auditStore).
         $this->seoReportSite = $config['seoReport'];
+        // Automatikmodus des Cron-Verbesserers (Fenster + Tagesmenge).
+        $this->improve = $config['improve'];
+        // Pausenschalter der drei Cron-Skripte.
+        $this->cronPause = $config['cron'];
+        // Automatischer Commit nach der Veröffentlichung.
+        $this->gitAuto = $config['git'];
         foreach ($config['warnings'] as $warning) {
             $this->addSetupWarning($warning['key'], $warning['params']);
         }
@@ -422,12 +473,15 @@ final class Connector
                 'aimodels' => $this->cmdAiModels(),
                 'projectconfig' => $this->cmdProjectConfig(),
                 'projectreconfigure' => $this->cmdProjectReconfigure($request),
+                'improveauto' => $this->cmdImproveAuto($request),
                 'setupdatelastmod' => $this->cmdSetUpdateLastmod($request),
                 'account' => $this->cmdAccount($request),
                 'license' => $this->cmdLicense(),
                 'activate' => $this->cmdActivate($request),
                 'status' => $this->cmdStatus(),
                 'statuscheck' => $this->cmdStatusCheck(),
+                'statuslog' => $this->cmdStatusLog($request),
+                'statuslogrotate' => $this->cmdStatusLogRotate(),
                 'help' => $this->cmdHelp($request),
                 'gitstatus' => $this->cmdGitStatus(),
                 'gitlog' => $this->cmdGitLog($request),
@@ -445,6 +499,7 @@ final class Connector
                 'auditcontentget' => $this->cmdAuditContentGet($request),
                 'auditcontentreport' => $this->cmdAuditContentReport($request),
                 'auditcontentrequeue' => $this->cmdAuditContentRequeue($request),
+                'auditcontentqueue' => $this->cmdAuditContentQueue($request),
                 'auditcontentupdate' => $this->cmdAuditContentUpdate($request),
                 'auditcontentdelete' => $this->cmdAuditContentDelete($request),
                 'reviewsave' => $this->cmdReviewSave($request),
@@ -631,7 +686,62 @@ final class Connector
             // Projekt. Keine Pro-Bindung — der Entwurf-Modus ist eine allgemeine
             // Sicherheitsfunktion (auch der Editor-Button nutzt ihn).
             'review' => $this->hugo !== null,
+            // Automatikmodus des Cron-Verbesserers dieser Webseite. Der Client
+            // zeigt ihn als Schalter in der Liste „zu verbessern“ und in den
+            // Projekteinstellungen. `effectivePerDay` ist die Menge, die im
+            // gewählten Fenster tatsächlich Platz hat — sie kann kleiner sein
+            // als der eingestellte Wert, und die Oberfläche soll die wahre Zahl
+            // nennen, nicht die gewünschte.
+            'improve' => $this->improve + ['effectivePerDay' => $this->improveSlotPlan()['perDay']],
+            // Pausenzustand der drei Cron-Skripte. Die Views (Freigabe-
+            // Warteschlange, „zu verbessern“) zeigen daraus einen Hinweis, wenn
+            // die zuständige Aufgabe ausgesetzt ist.
+            'cronPause' => $this->cronPause,
+            // Warum eine Funktion (noch) nicht nutzbar ist. Die Flags oben sagen
+            // nur ob — für den Pro-Hinweis muss der Client aber wissen, ob die
+            // Lizenz fehlt oder eine andere Voraussetzung. Siehe featureMatrix().
+            'features' => $this->featureMatrix(),
         ];
+    }
+
+    /**
+     * Zustand jeder gesperrten Funktion: nutzbar ja/nein und, falls nein, WAS
+     * fehlt. `blockers` listet alle offenen Voraussetzungen (nicht nur die
+     * erste), damit der Client ehrlich anzeigen kann, was eine Aktivierung der
+     * Pro-Lizenz allein noch nicht löst.
+     *
+     * Werte in `blockers`: 'pro' (keine gültige Lizenz für diese Domain),
+     * 'project' (kein Hugo-Projekt konfiguriert), 'aiKey' (kein [ai] api_key),
+     * 'service' (Dienst für Live-Analyse/Spracheingabe nicht konfiguriert).
+     *
+     * @return array<string, array{available: bool, blockers: list<string>}>
+     */
+    private function featureMatrix(): array
+    {
+        $pro = $this->license()->isPro();
+        $project = $this->hugo !== null;
+        $aiKey = $this->ai['apiKey'] !== null;
+        $service = $this->services['serviceKey'] !== null && $this->services['serviceUrl'] !== null;
+
+        // Voraussetzungen je Funktion, in der Reihenfolge, in der sie dem
+        // Benutzer genannt werden — die Lizenz zuerst, denn sie ist der Grund,
+        // aus dem die Funktion überhaupt beworben wird.
+        $needs = [
+            'git' => ['pro' => $pro, 'project' => $project],
+            'audit' => ['pro' => $pro, 'project' => $project],
+            'auditContent' => ['pro' => $pro, 'project' => $project, 'aiKey' => $aiKey],
+            'pagespeed' => ['pro' => $pro, 'project' => $project],
+            'liveAnalysis' => ['pro' => $pro, 'project' => $project, 'service' => $service],
+            'speech' => ['pro' => $pro, 'service' => $service],
+        ];
+
+        $out = [];
+        foreach ($needs as $feature => $conditions) {
+            $blockers = array_keys(array_filter($conditions, static fn (bool $met): bool => !$met));
+            $out[$feature] = ['available' => $blockers === [], 'blockers' => array_values($blockers)];
+        }
+
+        return $out;
     }
 
     private function cmdLogin(array $request): array
@@ -1067,27 +1177,217 @@ final class Connector
     }
 
     /**
-     * CLI-Einstieg (Cron): baut die Webseite ohne Web-Authentifizierung. Für die
-     * zeitgesteuerte Veröffentlichung der gestaffelten Freigabe — ein
-     * regelmäßiger Build macht freigegebene Seiten sichtbar, sobald ihr
-     * publishDate erreicht ist (Hugo wird ohne --buildFuture aufgerufen). Keine
-     * Pro-Lizenz nötig; setzt nur die Hugo-Konfiguration voraus.
+     * CLI-Einstieg (Cron): baut die Webseite ohne Web-Authentifizierung. Zweck
+     * ist die zeitgesteuerte Veröffentlichung der gestaffelten Freigabe.
      *
-     * @return array{success: bool, exitCode: int, output: string, seconds: float}
+     * Standardmäßig wird NUR gebaut, wenn tatsächlich fällige terminierte
+     * Freigaben anfielen — läuft der Cron alle paar Minuten, spart das den
+     * Hugo-Lauf, solange nichts zu veröffentlichen ist. Mit $force=true (CLI:
+     * --force) wird immer gebaut; das braucht, wer sich auf Hugos eigenes
+     * Front-Matter-`publishDate` verlässt, dessen Fälligkeit ein Build erst
+     * sichtbar macht (Hugo läuft ohne --buildFuture).
+     *
+     * Keine Pro-Lizenz nötig; setzt nur die Hugo-Konfiguration voraus.
+     *
+     * @return array<string, mixed>
      */
-    public function buildSite(): array
+    public function buildSite(bool $force = false): array
     {
+        if (!empty($this->cronPause['pauseBuild'])) {
+            return $this->cronPausedResult('build');
+        }
+
         return $this->withCronHeartbeat(
             'build',
-            fn (): array => $this->runHugoBuild(),
-            // Ein Hugo-Lauf mit exitCode != 0 wirft nicht, ist für den Cron aber
-            // sehr wohl ein Fehlschlag — sonst meldete der Status „erfolgreich“,
-            // während die Webseite seit Tagen nicht mehr gebaut wird.
-            static fn (array $r): array => [
-                (bool) ($r['success'] ?? false),
-                sprintf('Hugo beendet mit Code %d', (int) ($r['exitCode'] ?? 0)),
-            ],
+            function () use ($force): array {
+                // Vor allem anderen: offene (noch unversionierte) Änderungen im
+                // Quellverzeichnis sichern, damit sie NICHT im späteren
+                // Veröffentlichungs-Commit landen. Läuft bei jedem Cron-Lauf,
+                // auch ohne fällige Freigabe (dann bleibt es beim Vorab-Commit).
+                $committedPending = $this->maybeCommitPending();
+
+                // Fällige Freigaben anwenden und daran messen, ob der Build sich
+                // lohnt. Ein Fehler beim Anwenden darf einen erzwungenen Build
+                // nicht verhindern (dann wird trotzdem gebaut).
+                $applied = [];
+                try {
+                    $applied = $this->applyDueDrafts()['applied'] ?? [];
+                } catch (Throwable $e) {
+                    $this->logger->warning('Fällige Austausche nicht angewendet: ' . $e->getMessage());
+                }
+
+                if (!$force && $applied === []) {
+                    $this->logger->info('Cron-Build übersprungen — keine fälligen Freigaben.');
+
+                    return ['skipped' => true, 'applied' => 0, 'committedPending' => $committedPending];
+                }
+
+                // Freigaben sind bereits angewendet — nicht erneut anwenden.
+                $result = $this->runHugoBuild(false);
+                $result['applied'] = count($applied);
+                $result['committedPending'] = $committedPending;
+
+                // Optionaler Commit nach der Veröffentlichung: nur wenn wirklich
+                // Freigaben eingespielt wurden (ein reiner --force-Build ohne
+                // fällige Freigaben löst keinen Commit aus).
+                if ($applied !== []) {
+                    $result['committed'] = $this->maybeAutoCommit();
+                }
+
+                return $result;
+            },
+            // Übersprungen gilt als erfolgreicher Lauf (der Cron hat geprüft und
+            // nichts zu tun gefunden). Ein Hugo-Lauf mit exitCode != 0 wirft
+            // nicht, ist für den Cron aber ein Fehlschlag — sonst meldete der
+            // Status „erfolgreich“, während die Webseite nicht mehr gebaut wird.
+            static function (array $r): array {
+                // Ein Commit, der lief, aber nicht zustande kam (z. B. fehlende
+                // git-Identität), macht den Lauf NICHT zum Fehlschlag — der
+                // Hugo-Build ist ja gelungen. Er wird aber im Statustext
+                // sichtbar gemacht, nicht nur im Log. Voraussetzung ist ein
+                // ausdrückliches success=false; ein nicht versuchter Commit
+                // (sauberer Arbeitsbaum, kein Repo, Schalter aus) liefert null.
+                $commitNote = '';
+                if (isset($r['committedPending']['success']) && $r['committedPending']['success'] === false) {
+                    $commitNote .= '; Vorab-Commit fehlgeschlagen (siehe Log)';
+                }
+                if (isset($r['committed']['success']) && $r['committed']['success'] === false) {
+                    $commitNote .= '; Veröffentlichungs-Commit fehlgeschlagen (siehe Log)';
+                }
+
+                if (!empty($r['skipped'])) {
+                    $note = 'Übersprungen — keine fälligen Freigaben';
+                    if (!empty($r['committedPending']['success'])) {
+                        $note .= '; offene Änderungen committet';
+                    }
+
+                    return [true, $note . $commitNote];
+                }
+
+                return [
+                    (bool) ($r['success'] ?? false),
+                    sprintf(
+                        '%d Freigabe(n), Hugo Code %d',
+                        (int) ($r['applied'] ?? 0),
+                        (int) ($r['exitCode'] ?? 0),
+                    ) . $commitNote,
+                ];
+            },
         );
+    }
+
+    /**
+     * Legt nach der zeitgesteuerten Veröffentlichung optional einen Commit an
+     * (Schalter [git] auto_commit). Ein reiner Build ohne fällige Freigaben
+     * ruft dies nicht auf.
+     *
+     * @return ?array{success: bool, sha: ?string}
+     */
+    private function maybeAutoCommit(): ?array
+    {
+        // Nach der Veröffentlichung wird ein Commit erwartet — „nichts zu
+        // committen“ deshalb NICHT stillschweigend überspringen (skipWhenClean
+        // = false), damit ein echtes Problem sichtbar wird.
+        return $this->runAutoCommit(
+            (string) $this->gitAuto['commitMessage'],
+            MountConfig::GIT_COMMIT_MESSAGE_DEFAULT,
+            false,
+        );
+    }
+
+    /**
+     * Sichert VOR dem Build offene (noch unversionierte) Änderungen im
+     * Quellverzeichnis mit eigener Nachricht — nur wenn welche vorliegen, sonst
+     * still. So bleibt der spätere Veröffentlichungs-Commit auf die publizierten
+     * Dateien beschränkt und verstreute Direktbearbeitungen werden zeitnah
+     * versioniert. Hängt am selben Schalter [git] auto_commit.
+     *
+     * @return ?array{success: bool, sha: ?string}
+     */
+    private function maybeCommitPending(): ?array
+    {
+        // Läuft bei jedem Cron-Build (alle 15 Min.) — bei sauberem Arbeitsbaum
+        // still überspringen (skipWhenClean = true), sonst würde das Log mit
+        // „nichts zu committen“ zulaufen.
+        return $this->runAutoCommit(
+            (string) $this->gitAuto['commitMessagePending'],
+            MountConfig::GIT_COMMIT_MESSAGE_PENDING_DEFAULT,
+            true,
+        );
+    }
+
+    /**
+     * Gemeinsamer Auto-Commit. Voraussetzung: Schalter an, gültige Pro-Lizenz
+     * (Git ist eine Pro-Funktion) und ein Git-Repository im Quellverzeichnis.
+     * Fehlt eine Voraussetzung oder scheitert der Commit, wird das nur
+     * protokolliert — der Build darf daran nie scheitern.
+     *
+     * `git add -A` übernimmt ALLE offenen Änderungen im Arbeitsbaum (wie der
+     * manuelle Commit). An die Nachricht wird das Datum (Serverzeit) angehängt.
+     * $skipWhenClean = true committet nur, wenn der Arbeitsbaum überhaupt
+     * offene Änderungen hat (sonst still ohne Log).
+     *
+     * @return ?array{success: bool, sha: ?string}
+     */
+    private function runAutoCommit(string $message, string $fallback, bool $skipWhenClean): ?array
+    {
+        if (empty($this->gitAuto['autoCommit']) || $this->hugo === null) {
+            return null;
+        }
+        if (!$this->license()->isPro()) {
+            $this->logger->warning('Auto-Commit übersprungen — Git ist eine Pro-Funktion, aber keine gültige Lizenz vorhanden.');
+
+            return null;
+        }
+
+        $source = (string) $this->hugo['source'];
+        $message = trim($message);
+        if ($message === '') {
+            $message = $fallback;
+        }
+        // Datum anhängen (Serverzeit, wie die übrigen Cron-Zeiten).
+        $message .= ' — ' . date('Y-m-d H:i');
+
+        try {
+            $git = new GitService($source);
+            // Vorab-Commit nur bei wirklich offenen Änderungen — ein sauberer
+            // Arbeitsbaum ist hier der Normalfall und kein Ereignis fürs Log.
+            if ($skipWhenClean && !empty($git->status()['clean'])) {
+                return null;
+            }
+            $res = $git->commit($message);
+        } catch (Throwable $e) {
+            // Etwa GIT-NOT-A-REPO: kein Repository → nichts zu committen.
+            $this->logger->info('Auto-Commit übersprungen: ' . $e->getMessage());
+
+            return null;
+        }
+
+        if (!empty($res['success'])) {
+            $this->logger->info(sprintf('Auto-Commit %s: %s', substr((string) ($res['sha'] ?? ''), 0, 7), $message));
+        } else {
+            // Häufigster Fall ohne Fehler: „nichts zu committen“. Als Warnung mit
+            // Git-Ausgabe, damit ein echtes Problem (fehlende git-Identität)
+            // sichtbar wird.
+            $this->logger->warning('Auto-Commit nicht angelegt: ' . trim((string) ($res['output'] ?? '')));
+        }
+
+        return ['success' => (bool) ($res['success'] ?? false), 'sha' => $res['sha'] ?? null];
+    }
+
+    /**
+     * Einheitliche Antwort eines pausierten Cron-Laufs. Es wird KEIN Herzschlag
+     * vermerkt — der Lauf hat ja nichts getan, und im Systemstatus soll er nicht
+     * als „erfolgreich gelaufen“ erscheinen. Ein Log-Eintrag hält die Pause
+     * fest, damit ein stiller Cron nicht rätselhaft wirkt.
+     *
+     * @return array{paused: true}
+     */
+    private function cronPausedResult(string $job): array
+    {
+        $this->logger->info(sprintf('Cron-Aufgabe „%s“ ist pausiert — kein Lauf.', $job));
+
+        return ['paused' => true];
     }
 
     /**
@@ -1153,9 +1453,13 @@ final class Connector
      * kann. Nur die Vorbedingungen (fehlende Konfiguration/Programm/Quelle)
      * werfen eine Ausnahme.
      *
+     * $applyDrafts=false überspringt das Anwenden fälliger Freigaben — für
+     * Aufrufer, die das bereits selbst erledigt haben ({@see buildSite()}, das
+     * daraus erst entscheidet, ob überhaupt gebaut wird).
+     *
      * @return array{success: bool, exitCode: int, output: string, seconds: float}
      */
-    private function runHugoBuild(): array
+    private function runHugoBuild(bool $applyDrafts = true): array
     {
         if ($this->hugo === null) {
             throw new ApiException('ECONFIG', 500, 'HUGO-NOT-CONFIGURED');
@@ -1164,10 +1468,12 @@ final class Connector
         // Fällige terminierte Austausche zuerst anwenden (verzögerter Austausch
         // der gestaffelten Veröffentlichung), damit der Build die neuen Fassungen
         // sieht. Ein Fehler hier darf den Build nicht verhindern.
-        try {
-            $this->applyDueDrafts();
-        } catch (Throwable $e) {
-            $this->logger->warning('Fällige Austausche nicht angewendet: ' . $e->getMessage());
+        if ($applyDrafts) {
+            try {
+                $this->applyDueDrafts();
+            } catch (Throwable $e) {
+                $this->logger->warning('Fällige Austausche nicht angewendet: ' . $e->getMessage());
+            }
         }
 
         if ($this->hugoBin === null) {
@@ -1292,11 +1598,14 @@ final class Connector
      * Werkzeug get_file_report wird nur eingehängt, wenn Pro-Lizenz und
      * Hugo-Projekt vorliegen (sonst gibt es keinen Audit-/Content-Bericht).
      */
-    private function assistantService(?string $writeModeOverride = null, ?string $modelOverride = null, string $draftOrigin = 'ai'): AssistantService
+    private function assistantService(?string $writeModeOverride = null, ?string $modelOverride = null, string $draftOrigin = 'ai', ?bool $forceThinkingOverride = null): AssistantService
     {
         // Interaktiver Assistent nutzt `model`; der Cron-Verbesserer reicht sein
         // eigenes Modell (`model_cron`) als Override durch.
         $model = $modelOverride ?? $this->ai['model'];
+        // Thinking-Erzwingung folgt demselben Slot: interaktiv `forceThinking`,
+        // der Cron reicht `forceThinkingCron` als Override durch.
+        $forceThinking = $forceThinkingOverride ?? (bool) $this->ai['forceThinking'];
         // get_file_report und der Bearbeitungs-Vermerk brauchen beide das
         // Content-Qualitäts-Feature (Pro-Lizenz + Hugo-Projekt).
         $contentAware = $this->hugo !== null && $this->license()->isPro();
@@ -1326,6 +1635,7 @@ final class Connector
             $fileReport,
             $onWrite,
             $draftSink,
+            $forceThinking,
         );
     }
 
@@ -2143,7 +2453,12 @@ final class Connector
     public function improveNextContent(int $limit = 1, ?string $locale = null, bool $dryRun = false): array
     {
         if ($dryRun) {
+            // Der Probelauf ändert nichts und bleibt zum Testen auch bei Pause
+            // erlaubt — nur der echte Lauf setzt aus.
             return $this->runImproveBatch($limit, $locale, true);
+        }
+        if (!empty($this->cronPause['pauseImprove'])) {
+            return $this->cronPausedResult('improve');
         }
 
         return $this->withCronHeartbeat(
@@ -2185,6 +2500,8 @@ final class Connector
                 static fn (array $e): array => [
                     'path' => (string) ($e['mount'] ?? '') . '/' . (string) ($e['rel'] ?? ''),
                     'score' => $e['score'] ?? null,
+                    // Ohne Prüfung vorgemerkt (kein Score) — für die Anzeige.
+                    'queued' => (bool) ($e['queued'] ?? false),
                     'written' => false,
                 ],
                 array_slice($work, 0, $limit),
@@ -2193,7 +2510,7 @@ final class Connector
             return ['candidates' => count($work), 'dryRun' => true, 'processed' => $preview];
         }
 
-        $service = $this->assistantService('auto', $this->ai['modelCron'], 'cron');
+        $service = $this->assistantService('auto', $this->ai['modelCron'], 'cron', (bool) $this->ai['forceThinkingCron']);
         $processed = [];
         foreach (array_slice($work, 0, $limit) as $entry) {
             $mount = (string) ($entry['mount'] ?? '');
@@ -2203,15 +2520,26 @@ final class Connector
             }
             $path = $mount . '/' . $rel;
             $wrote = $this->runImprove($service, $path, $locale);
+
+            // Automatikmodus: den eben abgelegten Entwurf gleich terminieren,
+            // statt ihn auf die Freigabe warten zu lassen. Ohne Automatik bleibt
+            // er offen — die bisherige Voreinstellung.
+            $publishAt = null;
+            if ($wrote && !empty($this->improve['auto'])) {
+                $publishAt = $this->autoScheduleDraft($mount, $rel);
+            }
+
             $this->logger->info(sprintf(
                 'Cron-Verbesserung: %s (%s)',
                 $path,
-                $wrote ? 'geschrieben' : 'keine Änderung',
+                $wrote
+                    ? ($publishAt !== null ? 'geschrieben, terminiert auf ' . $publishAt : 'geschrieben')
+                    : 'keine Änderung',
             ));
-            $processed[] = ['path' => $path, 'written' => $wrote];
+            $processed[] = ['path' => $path, 'written' => $wrote, 'publishAt' => $publishAt];
         }
 
-        return ['candidates' => count($work), 'processed' => $processed];
+        return ['candidates' => count($work), 'processed' => $processed, 'auto' => !empty($this->improve['auto'])];
     }
 
     /**
@@ -2225,6 +2553,9 @@ final class Connector
      */
     public function runHealthCheck(bool $dryRun = false): array
     {
+        if (!$dryRun && !empty($this->cronPause['pauseHealthcheck'])) {
+            return $this->cronPausedResult('healthcheck');
+        }
         if ($dryRun) {
             return $this->runHealthCheckBatch(true);
         }
@@ -2340,10 +2671,167 @@ final class Connector
         return array_values(array_filter(
             $this->contentQualityStore()->list(),
             static fn (array $e): bool => empty($e['improvedAt'])
-                && is_numeric($e['score'] ?? null) && $e['score'] < 100
+                // Vorgemerkt (ohne Prüfung eingereiht) ODER geprüft mit Score < 100.
+                && (!empty($e['queued']) || (is_numeric($e['score'] ?? null) && $e['score'] < 100))
                 && ($e['sourceMissing'] ?? false) === false
                 && !isset($pendingKeys[ReviewStore::keyFor((string) ($e['mount'] ?? ''), (string) ($e['rel'] ?? ''))]),
         ));
+    }
+
+    /**
+     * Automatikmodus: terminiert den frisch erzeugten Entwurf einer Datei auf
+     * einen zufälligen Zeitpunkt, statt ihn offen auf die Freigabe warten zu
+     * lassen. Liefert den gesetzten Zeitpunkt (ISO 8601) oder null, wenn es
+     * keinen Entwurf gibt oder er bereits terminiert war.
+     *
+     * Verteilung: Das Tagesfenster wird in `perDay` gleich große Abschnitte
+     * geteilt; der Entwurf bekommt den ersten noch freien Abschnitt (ab heute
+     * vorwärts) und darin eine zufällige Minute. Dadurch stehen die Freigaben
+     * nie dicht beieinander, die Tagesmenge wird eingehalten, und trotzdem ist
+     * kein Zeitpunkt vorhersagbar.
+     */
+    private function autoScheduleDraft(string $mount, string $rel): ?string
+    {
+        $store = $this->reviewStore();
+        $key = ReviewStore::keyFor($mount, $rel);
+        $draft = $store->forKey($key);
+        if ($draft === null || !empty($draft['publishAt'])) {
+            return null;
+        }
+
+        $slot = $this->nextFreeSlot();
+        if ($slot === null) {
+            // Kein freier Platz im Suchzeitraum: Das Fenster ist zu eng oder die
+            // Tagesmenge zu klein für den Rückstau. Der Entwurf bleibt offen zur
+            // Freigabe — das ist der richtige Rückfall, darf aber nicht
+            // unbemerkt bleiben, sonst wundert sich niemand über die wachsende
+            // Warteschlange.
+            $this->logger->warning(sprintf(
+                'Automatische Terminierung: kein freier Platz in den nächsten %d Tagen für %s/%s '
+                . '(Fenster %s–%s, %d/Tag). Der Entwurf bleibt offen zur Freigabe.',
+                self::AUTO_SCHEDULE_HORIZON_DAYS,
+                $mount,
+                $rel,
+                (string) $this->improve['windowStart'],
+                (string) $this->improve['windowEnd'],
+                $this->improveSlotPlan()['perDay'],
+            ));
+
+            return null;
+        }
+        $draft['publishAt'] = gmdate('c', $slot);
+        $store->put($draft);
+
+        return $draft['publishAt'];
+    }
+
+    /**
+     * Teilt das Veröffentlichungsfenster in Abschnitte auf — die eine Stelle,
+     * an der diese Rechnung steht. {@see nextFreeSlot()} vergibt danach die
+     * Termine, whoami und die Projekteinstellungen melden `perDay` daraus an
+     * den Client, damit die Oberfläche die TATSÄCHLICHE Tagesmenge nennt.
+     *
+     * Passen weniger Minuten ins Fenster als Freigaben gewünscht sind, wird die
+     * Tagesmenge auf die Zahl der Minuten gekürzt (mehr als eine Freigabe je
+     * Minute ergibt keinen Sinn). Der Überhang wandert auf die Folgetage.
+     *
+     * @return array{windowStart: int, windowEnd: int, perDay: int, slotLength: int, inset: int}
+     */
+    private function improveSlotPlan(): array
+    {
+        [$startH, $startM] = array_map('intval', explode(':', (string) $this->improve['windowStart']));
+        [$endH, $endM] = array_map('intval', explode(':', (string) $this->improve['windowEnd']));
+        $windowStart = $startH * 60 + $startM;
+        $windowEnd = $endH * 60 + $endM;
+        $minutes = max(1, $windowEnd - $windowStart);
+
+        $perDay = max(1, (int) $this->improve['perDay']);
+        $slotLength = intdiv($minutes, $perDay);
+        if ($slotLength < 1) {
+            // Mehr Plätze als Minuten im Fenster — dann eben minutengenau.
+            $slotLength = 1;
+            $perDay = min($perDay, $minutes);
+        }
+
+        return [
+            'windowStart' => $windowStart,
+            'windowEnd' => $windowEnd,
+            'perDay' => $perDay,
+            'slotLength' => $slotLength,
+            // Viertel der Abschnittslänge an jedem Rand → die Zufallsminute
+            // stammt aus der mittleren Hälfte (siehe nextFreeSlot).
+            'inset' => intdiv($slotLength, 4),
+        ];
+    }
+
+    /**
+     * Sucht den nächsten freien Veröffentlichungsplatz für den Automatikmodus.
+     * Belegt sind Plätze durch bereits terminierte Entwürfe; „frei“ heißt: an
+     * diesem Tag ist dieser Abschnitt des Fensters noch unbesetzt und liegt
+     * nicht in der Vergangenheit.
+     *
+     * Sucht bis zu {@see AUTO_SCHEDULE_HORIZON_DAYS} Tage voraus — reicht selbst
+     * für einen großen Rückstand bei kleiner Tagesmenge und verhindert eine
+     * Endlosschleife.
+     *
+     * @return ?int Unix-Zeitstempel oder null, wenn im Suchfenster nichts frei ist
+     */
+    private function nextFreeSlot(): ?int
+    {
+        ['windowStart' => $windowStart, 'perDay' => $perDay, 'slotLength' => $slotLength, 'inset' => $inset]
+            = $this->improveSlotPlan();
+
+        // Bereits vergebene Plätze: Tag (Y-m-d, Serverzeit) → belegte Abschnitte.
+        $taken = [];
+        foreach ($this->reviewStore()->list() as $entry) {
+            $at = $entry['publishAt'] ?? null;
+            if (!is_string($at) || $at === '') {
+                continue;
+            }
+            $ts = strtotime($at);
+            if ($ts === false) {
+                continue;
+            }
+            $minutes = (int) date('G', $ts) * 60 + (int) date('i', $ts);
+            $index = $slotLength > 0 ? intdiv($minutes - $windowStart, $slotLength) : 0;
+            $taken[date('Y-m-d', $ts)][$index] = true;
+        }
+
+        $skipWeekends = !empty($this->improve['skipWeekends']);
+        $now = time();
+        for ($day = 0; $day < self::AUTO_SCHEDULE_HORIZON_DAYS; $day++) {
+            $dayStart = strtotime("+{$day} day", $now);
+            // Samstag (6) und Sonntag (0) auf Wunsch überspringen (Serverzeit).
+            if ($skipWeekends && in_array((int) date('w', $dayStart), [0, 6], true)) {
+                continue;
+            }
+            $key = date('Y-m-d', $dayStart);
+            for ($slot = 0; $slot < $perDay; $slot++) {
+                if (isset($taken[$key][$slot])) {
+                    continue;
+                }
+                // Randabstand: Die Zufallsminute kommt aus der MITTLEREN HÄLFTE
+                // des Abschnitts. Ohne ihn könnten zwei Freigaben an der Grenze
+                // zweier Abschnitte fast zusammenfallen (etwa 12:59 und 13:01);
+                // so liegen sie immer mindestens eine halbe Abschnittslänge
+                // auseinander.
+                $from = $windowStart + $slot * $slotLength + $inset;
+                $to = $windowStart + ($slot + 1) * $slotLength - 1 - $inset;
+                $base = mktime(0, 0, 0, (int) date('n', $dayStart), (int) date('j', $dayStart), (int) date('Y', $dayStart));
+                if ($base === false) {
+                    continue;
+                }
+                $earliest = max($base + $from * 60, $now + 60);
+                $latest = $base + $to * 60;
+                if ($earliest > $latest) {
+                    continue; // Abschnitt liegt (heute) bereits in der Vergangenheit
+                }
+
+                return random_int($earliest, $latest);
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -2497,6 +2985,11 @@ final class Connector
             'aiModelAudit' => $raw['ai']['model_audit'] ?? '',
             'aiWriteMode'  => $raw['ai']['write_mode'] ?? 'confirm',
             'aiWriteModes' => self::AI_WRITE_MODES,
+            // Adaptives Thinking erzwingen (sonst entscheidet die Positivliste) —
+            // getrennt für Assistent und Cron-Verbesserer, für neu eingetragene,
+            // noch unbekannte Modelle.
+            'aiForceThinking' => filter_var($raw['ai']['force_thinking'] ?? false, FILTER_VALIDATE_BOOLEAN),
+            'aiForceThinkingCron' => filter_var($raw['ai']['force_thinking_cron'] ?? false, FILTER_VALIDATE_BOOLEAN),
             // Hinterlegte Modell-Auswahl (leer = der Client nutzt seine eigene
             // Liste). Der Aktualisieren-Knopf im Dialog füllt sie über /aimodels.
             'aiModels'     => Config::normalizeModels($raw['ai']['models'] ?? ''),
@@ -2580,6 +3073,14 @@ final class Connector
             $aiSection['model_audit'] = $aiModelAudit;
         }
         $aiSection['write_mode'] = $aiWriteMode;
+        // Adaptives Thinking erzwingen — je Slot, nur schreiben, wenn an (INI
+        // schlank halten; Config::aiSection() liest fehlend als aus).
+        if (filter_var($request['aiForceThinking'] ?? false, FILTER_VALIDATE_BOOLEAN)) {
+            $aiSection['force_thinking'] = 'true';
+        }
+        if (filter_var($request['aiForceThinkingCron'] ?? false, FILTER_VALIDATE_BOOLEAN)) {
+            $aiSection['force_thinking_cron'] = 'true';
+        }
         // Die abgerufene Modell-Liste gehört nicht ins Formular; sie wird hier
         // aus dem Bestand übernommen, sonst löschte jedes Speichern sie.
         $existingModels = Config::normalizeModels($existingAi['models'] ?? '');
@@ -2783,7 +3284,40 @@ final class Connector
             'seoExcludeFiles' => implode("\n", Config::normalizeExcludeFiles(
                 (string) ($raw['seo_report']['exclude_files'] ?? ''),
             )),
+            // Automatikmodus des Cron-Verbesserers: bereits geprüft und
+            // normalisiert aus der geladenen Konfiguration, nicht roh aus der
+            // INI — so zeigt das Formular genau die Werte, die auch gelten.
+            'improveAuto' => (bool) $this->improve['auto'],
+            'improveWindowStart' => (string) $this->improve['windowStart'],
+            'improveWindowEnd' => (string) $this->improve['windowEnd'],
+            'improvePerDay' => (int) $this->improve['perDay'],
+            'improveSkipWeekends' => (bool) $this->improve['skipWeekends'],
+            // Was im Fenster tatsächlich Platz hat (siehe improveSlotPlan).
+            'improveEffectivePerDay' => $this->improveSlotPlan()['perDay'],
+            // Pausenschalter der drei Cron-Skripte.
+            'pauseBuild' => (bool) $this->cronPause['pauseBuild'],
+            'pauseImprove' => (bool) $this->cronPause['pauseImprove'],
+            'pauseHealthcheck' => (bool) $this->cronPause['pauseHealthcheck'],
+            // Automatischer Commit nach der Veröffentlichung.
+            'autoCommit' => (bool) $this->gitAuto['autoCommit'],
+            'commitMessage' => (string) $this->gitAuto['commitMessage'],
+            'commitMessagePending' => (string) $this->gitAuto['commitMessagePending'],
+            // Ist die Quelle ein Git-Repository? Für den Hinweis im Formular.
+            'gitRepo' => $this->sourceIsGitRepo(),
         ];
+    }
+
+    /** true, wenn das Hugo-Quellverzeichnis ein Git-Arbeitsbaum ist. */
+    private function sourceIsGitRepo(): bool
+    {
+        if ($this->hugo === null) {
+            return false;
+        }
+        try {
+            return (new GitService((string) $this->hugo['source']))->isRepository();
+        } catch (Throwable) {
+            return false;
+        }
     }
 
     /**
@@ -2805,16 +3339,142 @@ final class Connector
         }
 
         $seoSection = self::seoReportSection($request);
-        Config::updateSections($this->mountsPath, ['seo_report' => $seoSection]);
+        $improveSection = $this->improveSectionFrom($request);
+        $cronSection = $this->cronSectionFrom($request);
+        $gitSection = $this->gitSectionFrom($request);
+        Config::updateSections($this->mountsPath, [
+            'seo_report' => $seoSection,
+            'improve' => $improveSection,
+            'cron' => $cronSection,
+            'git' => $gitSection,
+        ]);
         // Für den weiteren Verlauf DIESES Requests sofort wirksam (der Audit
         // liest die Ausschlüsse aus dem Connector, nicht erneut aus der Datei).
         $this->seoReportSite = [
             'excludePrefixes' => Config::normalizeExcludePrefixes($seoSection['exclude_prefixes'] ?? ''),
             'excludeFiles' => Config::normalizeExcludeFiles($seoSection['exclude_files'] ?? ''),
         ];
+        $this->reloadImprove();
+        // Pausenzustand und Auto-Commit für DIESEN Request nachziehen, sonst
+        // meldete ein direkt folgendes projectconfig/whoami noch die alten Werte.
+        $reloaded = MountConfig::load($this->mountsPath);
+        $this->cronPause = $reloaded['cron'];
+        $this->gitAuto = $reloaded['git'];
         $this->logger->info('Projekteinstellungen aktualisiert (projectreconfigure).');
 
         return ['ok' => true];
+    }
+
+    /**
+     * Baut die [cron]-Sektion aus den Formularfeldern der Projekteinstellungen.
+     * Immer vollständig (nie null), damit der Pausenzustand in der Datei
+     * ablesbar bleibt. Der Pausenzustand wird ausschließlich hierüber geändert
+     * (das Kontrollkästchen im Projektformular); der Systemstatus zeigt ihn nur
+     * an und verweist zum Umstellen hierher.
+     *
+     * @param array<string, mixed> $request
+     * @return array<string, string>
+     */
+    private function cronSectionFrom(array $request): array
+    {
+        return [
+            'pause_build' => !empty($request['pauseBuild']) ? 'true' : 'false',
+            'pause_improve' => !empty($request['pauseImprove']) ? 'true' : 'false',
+            'pause_healthcheck' => !empty($request['pauseHealthcheck']) ? 'true' : 'false',
+        ];
+    }
+
+    /**
+     * Baut die [git]-Sektion aus den Formularfeldern (Auto-Commit nach der
+     * Veröffentlichung). Leere Nachricht → Vorgabe, damit die Datei ablesbar
+     * bleibt. Prüfung und Kürzung übernimmt MountConfig beim Lesen.
+     *
+     * @param array<string, mixed> $request
+     * @return array<string, string>
+     */
+    private function gitSectionFrom(array $request): array
+    {
+        $message = trim((string) ($request['commitMessage'] ?? ''));
+        $pending = trim((string) ($request['commitMessagePending'] ?? ''));
+
+        return [
+            'auto_commit' => !empty($request['autoCommit']) ? 'true' : 'false',
+            'commit_message' => $message === '' ? MountConfig::GIT_COMMIT_MESSAGE_DEFAULT : $message,
+            'commit_message_pending' => $pending === '' ? MountConfig::GIT_COMMIT_MESSAGE_PENDING_DEFAULT : $pending,
+        ];
+    }
+
+    /**
+     * improveauto — schaltet allein den Automatikmodus um (Schalter in der
+     * Liste „zu verbessern“). Fenster und Tagesmenge bleiben unverändert; sie
+     * gehören in die Projekteinstellungen. Ein eigener Befehl, damit der
+     * Schalter nicht das ganze Formular mitschreiben muss.
+     */
+    private function cmdImproveAuto(array $request): array
+    {
+        $this->requireAuth();
+        $this->requireMethod('POST');
+        // Bewusst OHNE requirePro: Hier wird nur eine Einstellung gespeichert,
+        // genau wie über die Projekteinstellungen (cmdProjectReconfigure, die
+        // ebenfalls keine Lizenz verlangen). Wirksam wird sie erst im
+        // Cron-Verbesserer — und DER prüft die Pro-Lizenz.
+        if ($this->mountsPath === null) {
+            throw new ApiException('ECONFIG', 409, 'PROJECT-CONFIG-UNAVAILABLE');
+        }
+
+        $enabled = (bool) ($request['enabled'] ?? false);
+        // Nur `auto` ändern; die übrigen Felder wörtlich aus dem aktuellen Stand
+        // übernehmen, damit der Schalter Fenster, Menge und Wochenend-Ausnahme
+        // nicht versehentlich zurücksetzt.
+        Config::updateSections($this->mountsPath, [
+            'improve' => [
+                'auto' => $enabled ? 'true' : 'false',
+                'window_start' => (string) $this->improve['windowStart'],
+                'window_end' => (string) $this->improve['windowEnd'],
+                'per_day' => (string) (int) $this->improve['perDay'],
+                'skip_weekends' => $this->improve['skipWeekends'] ? 'true' : 'false',
+            ],
+        ]);
+        $this->reloadImprove();
+        $this->logger->info('Automatische Terminierung ' . ($enabled ? 'eingeschaltet' : 'ausgeschaltet') . '.');
+
+        return ['improve' => $this->improve + ['effectivePerDay' => $this->improveSlotPlan()['perDay']]];
+    }
+
+    /**
+     * Baut die [improve]-Sektion aus den Formularfeldern. Immer vollständig
+     * geschrieben (nie null): Der Automatikmodus soll in der Datei ablesbar
+     * sein, auch wenn er aus ist — sonst wirkte eine fehlende Sektion wie „nie
+     * eingerichtet“, obwohl der Benutzer sie bewusst abgeschaltet hat.
+     *
+     * @param array<string, mixed> $request
+     * @return array<string, string>
+     */
+    private function improveSectionFrom(array $request): array
+    {
+        return [
+            'auto' => !empty($request['improveAuto']) ? 'true' : 'false',
+            // Prüfung und Rückfall auf gültige Werte macht MountConfig beim
+            // Lesen — hier wird nur roh durchgereicht, damit beide Wege
+            // (Formular und INI von Hand) dieselbe Prüfung durchlaufen.
+            'window_start' => trim((string) ($request['improveWindowStart'] ?? '')),
+            'window_end' => trim((string) ($request['improveWindowEnd'] ?? '')),
+            'per_day' => (string) (int) ($request['improvePerDay'] ?? 3),
+            'skip_weekends' => !empty($request['improveSkipWeekends']) ? 'true' : 'false',
+        ];
+    }
+
+    /**
+     * Liest die [improve]-Sektion nach dem Schreiben neu ein, damit die Antwort
+     * dieses Requests bereits die geprüften Werte trägt (MountConfig normalisiert
+     * Uhrzeiten und deckelt die Tagesmenge).
+     */
+    private function reloadImprove(): void
+    {
+        if ($this->mountsPath === null) {
+            return;
+        }
+        $this->improve = MountConfig::load($this->mountsPath)['improve'];
     }
 
     /**
@@ -2955,9 +3615,31 @@ final class Connector
                 ],
             ],
             'license' => $this->license()->info(),
-            'cron' => $this->cronHeartbeat()?->all() ?? [],
+            'cron' => $this->cronStatusList(),
             'tasks' => $this->pendingCronTasks(),
         ];
+    }
+
+    /**
+     * Cron-Aufgaben für den Systemstatus: der Herzschlag jeder Aufgabe, ergänzt
+     * um ihren Pausenzustand (für das Kontrollkästchen und die Ampel).
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function cronStatusList(): array
+    {
+        $pauseField = [
+            'build' => 'pauseBuild',
+            'improve' => 'pauseImprove',
+            'healthcheck' => 'pauseHealthcheck',
+        ];
+
+        return array_map(function (array $entry) use ($pauseField): array {
+            $field = $pauseField[$entry['job']] ?? null;
+            $entry['paused'] = $field !== null && !empty($this->cronPause[$field]);
+
+            return $entry;
+        }, $this->cronHeartbeat()?->all() ?? []);
     }
 
     /**
@@ -3044,6 +3726,41 @@ final class Connector
                 fn () => $this->buildMailer()->verify(),
             ),
         ];
+    }
+
+    /**
+     * statuslog — die letzten Zeilen eines Logstands für die Protokollansicht
+     * im Systemstatus. Der Basispfad kommt ausschließlich aus der Konfiguration
+     * ([log] file); der Client bestimmt nur, WIE VIELE Zeilen (`lines`) und
+     * WELCHEN Stand (`index`) er sehen will — 0 die aktuelle Datei, N > 0 den
+     * rotierten Stand „.N“. Freie Pfade sind bewusst ausgeschlossen.
+     *
+     * Der Antwort liegt unter `archives` die Liste der vorhandenen Stände bei,
+     * damit das Auswahlfeld ohne zweiten Aufruf gefüllt ist.
+     */
+    private function cmdStatusLog(array $request): array
+    {
+        $this->requireAuth();
+
+        $lines = (int) ($request['lines'] ?? 200);
+        $index = (int) ($request['index'] ?? 0);
+
+        $out = $this->logger->tail($lines, $index);
+        $out['archives'] = $this->logger->archives();
+
+        return $out;
+    }
+
+    /**
+     * statuslogrotate — rotiert die Logdatei auf ausdrücklichen Wunsch sofort,
+     * unabhängig von der Größenschwelle. Der laufende Stand wandert zur .1, die
+     * älteren rücken nach, der älteste fällt weg (siehe Logger::rotate).
+     */
+    private function cmdStatusLogRotate(): array
+    {
+        $this->requireAuth();
+
+        return ['rotated' => $this->logger->rotate()];
     }
 
     /**
@@ -3409,6 +4126,49 @@ final class Connector
         $key = $this->requireParam($request, 'key');
 
         return $this->withContentFileId($service->requeue($key));
+    }
+
+    /**
+     * Merkt eine oder mehrere Content-Dateien zur KI-Verbesserung vor — OHNE den
+     * kostenpflichtigen Qualitäts-Check. Optionale Freitext-Anweisung an die KI
+     * wird jeder Datei mitgegeben. Danach stehen die Dateien unter „zu
+     * verbessern" und werden vom Cron-Verbesserer (oder auf Knopfdruck)
+     * bearbeitet. Nicht auflösbare/lesbare Dateien werden einzeln gemeldet, ohne
+     * den ganzen Aufruf scheitern zu lassen.
+     *
+     * @return array{queued: int, failed: list<array{id: string, error: ?string}>, pages: list<array<string, mixed>>}
+     */
+    private function cmdAuditContentQueue(array $request): array
+    {
+        $service = $this->contentQuality();
+        $this->requireMethod('POST');
+
+        $ids = $request['ids'] ?? null;
+        if (!is_array($ids) || $ids === []) {
+            throw ApiException::badRequest('PARAM-MISSING', ['ids']);
+        }
+        $instruction = is_string($request['instruction'] ?? null) ? $request['instruction'] : null;
+
+        $queued = 0;
+        $failed = [];
+        foreach ($ids as $id) {
+            if (!is_string($id) || $id === '') {
+                continue;
+            }
+            try {
+                $service->queueForImprovement($id, $instruction);
+                $queued++;
+            } catch (ApiException $e) {
+                $failed[] = ['id' => $id, 'error' => $e->messageKey() ?? $e->errorCode()];
+            }
+        }
+        $this->logger->info(sprintf('Zur KI-Verbesserung vorgemerkt: %d Datei(en), %d fehlgeschlagen.', $queued, count($failed)));
+
+        return [
+            'queued' => $queued,
+            'failed' => $failed,
+            'pages' => array_map(fn (array $e): array => $this->withContentFileId($e), $service->list()),
+        ];
     }
 
     /**

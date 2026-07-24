@@ -65,6 +65,12 @@ if (!is_file($mountsFile)) {
     fwrite(STDERR, "Fehler: Mount-Konfiguration nicht gefunden ($mountsFile).\n");
     exit(2);
 }
+// Mount-Pfad kanonisieren: Das Speicherverzeichnis der Berichte/Entwürfe leitet
+// sich aus dem Hugo-Quellpfad ab (sha1), und der hängt am Verzeichnis der
+// Mount-Datei. Ein relativer --mounts ergäbe sonst einen anderen String als der
+// Web-Zugang (absoluter Pfad) — der Cron fände die dort angelegten Einträge
+// nicht. realpath macht relativen und absoluten Aufruf deckungsgleich.
+$mountsFile = realpath($mountsFile) ?: $mountsFile;
 
 // Die Lizenzprüfung liest die Domäne aus $_SERVER['HTTP_HOST'] (SiteKey::host).
 // Im CLI gibt es keinen Host — hier den lizenzierten Domainnamen setzen.
@@ -90,6 +96,12 @@ try {
     $connector?->logException($e);
     fwrite(STDERR, 'Fehler: ' . $e->getMessage() . "\n");
     exit(1);
+}
+
+// Im Systemstatus für diese Webseite pausiert (siehe [cron] pause_healthcheck).
+if (!empty($result['paused'])) {
+    fwrite(STDOUT, "Cron-Aufgabe „healthcheck“ ist pausiert — kein Lauf.\n");
+    exit(0);
 }
 
 $summary = $result['summary'] ?? ['error' => 0, 'warning' => 0, 'hint' => 0];
