@@ -8,6 +8,9 @@ use HugoCMS\FileManager\Audit\AuditMailReport;
 use HugoCMS\FileManager\Audit\AuditService;
 use HugoCMS\FileManager\Audit\ContentQualityService;
 use HugoCMS\FileManager\Auth\AuthInterface;
+use HugoCMS\FileManager\Auth\SiteAwareInterface;
+use HugoCMS\FileManager\Auth\UserAdminInterface;
+use HugoCMS\FileManager\Auth\UserStore;
 use HugoCMS\FileManager\Cron\Heartbeat;
 use HugoCMS\FileManager\Exception\ApiException;
 use HugoCMS\FileManager\Review\FrontMatter;
@@ -114,8 +117,21 @@ final class Connector
      */
     private ?string $liveAnalysisUrl = null;
 
-    /** Globale [user]-Einstellungen (Sitzungsdauer, Inhaltsbreite). */
-    private array $user = ['sessionLifetime' => 28800, 'contentWidth' => 1200, 'updateLastmod' => null];
+    /**
+     * Globale [user]-Vorgaben aus der hugocms.ini (Sitzungsdauer, Inhaltsbreite,
+     * Werkzeugleiste). Sie gelten vor der Anmeldung und beim Einzelbenutzer;
+     * beim Mehrbenutzer bringt jedes Konto eigene Werte mit — die liefert der
+     * Treiber (siehe {@see userPrefs()}).
+     */
+    private array $user = [
+        'sessionLifetime' => 28800,
+        'contentWidth' => 1200,
+        'toolbarCollapsed' => false,
+        'updateLastmod' => null,
+    ];
+
+    /** Zwischenspeicher der wirksamen Einstellungen (einmal je Request). */
+    private ?array $userPrefs = null;
 
     /**
      * E-Mail-Versand aus der [mail]-Sektion der hugocms.ini (Gesundheitscheck-
@@ -289,6 +305,21 @@ final class Connector
         }
 
         $this->auth = $options['auth'];
+
+        // Treiber, deren Entscheidungen an der aufgerufenen Webseite hängen
+        // (Mehrbenutzer: Zuordnung und Pro-Schranke), bekommen den Kontext hier.
+        // Der Lizenzstatus kommt als Rückruf, weil die Mount-Konfiguration erst
+        // nach dem Konstruktor geladen wird (mountsFromFile).
+        // Bezugsgröße ist der HOST, nicht der volle SiteKey: Daran hängt schon
+        // die Lizenz, und ein Umzug des Endpunkts von /cms-api nach /hugocms-api
+        // soll keine Zuordnung entwerten.
+        if ($this->auth instanceof SiteAwareInterface) {
+            $this->auth->bindSite(
+                SiteKey::host($_SERVER),
+                fn (): bool => $this->license()->isPro(),
+            );
+        }
+
         $this->resolver = new MountResolver();
         $this->files = new FileService(
             $this->resolver,
@@ -474,7 +505,12 @@ final class Connector
                 'projectconfig' => $this->cmdProjectConfig(),
                 'projectreconfigure' => $this->cmdProjectReconfigure($request),
                 'improveauto' => $this->cmdImproveAuto($request),
-                'setupdatelastmod' => $this->cmdSetUpdateLastmod($request),
+                'setuserprefs' => $this->cmdSetUserPrefs($request),
+                'users' => $this->cmdUsers(),
+                'usercreate' => $this->cmdUserCreate($request),
+                'userupdate' => $this->cmdUserUpdate($request),
+                'userpassword' => $this->cmdUserPassword($request),
+                'userdelete' => $this->cmdUserDelete($request),
                 'account' => $this->cmdAccount($request),
                 'license' => $this->cmdLicense(),
                 'activate' => $this->cmdActivate($request),
@@ -610,12 +646,18 @@ final class Connector
             // Ist ein Hugo-Aufruf möglich? Nötig sind das zentrale Programm
             // (hugocms.ini) UND der Webseiten-Teil (source) der Mount-Konfig.
             'buildable' => $this->hugo !== null && $this->hugoBin !== null,
-            // Lässt sich die Konfiguration im laufenden Betrieb ändern? Nur,
-            // wenn der Connector aus einer hugocms.ini aufgebaut wurde.
+            // Lässt sich die Konfiguration im laufenden Betrieb EINSEHEN? Das
+            // setzt nur voraus, dass der Connector aus einer hugocms.ini
+            // aufgebaut wurde. Ob das Konto auch SPEICHERN darf, sagt
+            // `manageConfig` — der Dialog sperrt seine Felder danach.
             'reconfigurable' => $this->configPath !== null,
-            // Dasselbe für die Einstellungen DIESER Webseite: nur, wenn die
-            // Mounts aus einer Datei stammen (bei programmatischer Konfiguration
-            // über custom.php gibt es keine Datei zum Schreiben).
+            // Die Einstellungen DIESER Webseite (SEO-Ausschlüsse, Verbesserer,
+            // Cron-Pausen, Auto-Commit, Analyse-Adressen) stehen JEDEM
+            // angemeldeten Konto offen — sie gehören zur redaktionellen Arbeit
+            // an der Webseite, nicht zur Verwaltung der Installation.
+            // Voraussetzung ist nur, dass die Mounts aus einer Datei stammen
+            // (bei programmatischer Konfiguration über custom.php gibt es keine
+            // Datei zum Schreiben).
             'projectConfigurable' => $this->mountsPath !== null,
             // KI-Assistent: aktiv, wenn ein API-Schlüssel konfiguriert ist.
             'ai' => [
@@ -626,22 +668,28 @@ final class Connector
                 // seine eigene Liste (siehe util/aiModels.js).
                 'models' => $this->ai['models'],
             ],
-            // Globale UI-Vorgaben aus [user]. contentWidth ist im Einzelbenutzer-
-            // Modus der Startwert für die Fensterbreite nach jedem Neuladen.
-            'ui' => [
-                'contentWidth' => $this->user['contentWidth'],
-                // Dreiwertig: null = beim Speichern nach lastmod-Aktualisierung
-                // fragen; true/false = ohne Nachfrage anwenden.
-                'updateLastmod' => $this->user['updateLastmod'],
-            ],
+            // Einstellungen aus [user]: die des angemeldeten Kontos, sonst die
+            // globalen Vorgaben. Der Client merkt darin selbst nach, was der
+            // Benutzer mit der Maus einstellt (Befehl setuserprefs).
+            'ui' => $this->uiState(),
+            // Kontenverwaltung: nur beim Mehrbenutzer-Treiber und nur für
+            // Administratoren. Der Client blendet den Menüpunkt danach ein.
+            'manageUsers' => $this->auth instanceof UserAdminInterface
+                && $this->auth->can('users.manage'),
+            // Darf dieses Konto konfigurieren? Bewusst getrennt von
+            // `reconfigurable`, das zusätzlich eine schreibbare hugocms.ini
+            // verlangt: Der Konfigurationsdialog sperrt darüber seine Felder,
+            // auch wenn er auf anderem Weg geöffnet wird.
+            'manageConfig' => $this->auth->can('config.manage'),
             // Pro-Edition (Git u. Ä.). 'configured' meldet einen hinterlegten,
             // ggf. ungültigen Schlüssel (falsche Domain) — für einen Hinweis im
             // Client. Der Schlüssel selbst wird nie zurückgegeben.
             'license' => $this->license()->info(),
             // Lässt sich eine Lizenz aktivieren? Nur, wenn eine Mount-Datei
             // geladen wurde (mounts/<hash>.ini bzw. mounts.ini) — dorthin wird
-            // geschrieben. Bei custom.php (programmatisch) nicht möglich.
-            'licensable' => $this->mountsPath !== null,
+            // geschrieben. Bei custom.php (programmatisch) nicht möglich, und
+            // nur für Konten, die konfigurieren dürfen.
+            'licensable' => $this->mountsPath !== null && $this->auth->can('config.manage'),
             // Git ist nur nutzbar, wenn die Webseite ein Hugo-Projekt hat
             // (dort liegt das Repository) UND eine gültige Pro-Lizenz vorliegt.
             'git' => $this->hugo !== null && $this->license()->isPro(),
@@ -760,11 +808,16 @@ final class Connector
             throw ApiException::unauthorized('LOGIN-FAILED');
         }
 
-        return [
-            'authenticated' => true,
-            'user' => $this->auth->currentUser(),
-            'csrf' => $this->csrfToken(),
-        ];
+        // Der Client holt nach dem Login KEIN whoami nach — die erste Anfrage
+        // danach kann noch das alte Sitzungs-Cookie tragen und käme als „nicht
+        // angemeldet" zurück. Deshalb liefert der Login denselben vollständigen
+        // Zustand: Alles, was vom angemeldeten Konto abhängt (Einstellungen,
+        // Verwaltungsrechte, welche Dialoge offenstehen), ist damit auf einen
+        // Schlag richtig. Einzelne Felder hier nachzupflegen ginge schief,
+        // sobald whoami um eines erweitert wird.
+        $this->userPrefs = null;
+
+        return $this->cmdWhoami();
     }
 
     private function cmdLogout(): array
@@ -2976,6 +3029,13 @@ final class Connector
     /** Erlaubte Log-Stufen — gemeinsam für Lesen (config) und Schreiben. */
     private const LOG_LEVELS = ['debug', 'info', 'warning', 'error'];
 
+    /**
+     * Über den Konfigurationsdialog umschaltbare Anmeldeverfahren. Weitere
+     * Treiber lassen sich programmatisch registrieren (Connector-Option
+     * „authDrivers"); die stehen dann nicht im Dialog, bleiben aber gültig.
+     */
+    private const AUTH_DRIVERS = ['singleuser', 'multiuser'];
+
     /** Erlaubte Schreibmodi des KI-Assistenten. */
     private const AI_WRITE_MODES = ['readonly', 'confirm', 'auto'];
 
@@ -2986,12 +3046,24 @@ final class Connector
     private const MIN_PASSWORD_LENGTH = 8;
 
     /**
+     * Grenzen für eine über den Konto-Dialog gesetzte Sitzungsdauer (Stunden):
+     * eine Viertelstunde bis 30 Tage. Beim LESEN gelten sie nicht — ein von Hand
+     * eingetragener Wert bleibt wirksam.
+     */
+    private const MIN_SESSION_LIFETIME_HOURS = 0.25;
+    private const MAX_SESSION_LIFETIME_HOURS = 720;
+
+    /**
      * Liefert die aktuellen, ROHEN (nicht aufgelösten) Konfigurationswerte aus
      * der hugocms.ini zum Vorbefüllen des Umkonfigurations-Formulars. Die
      * Anmeldedaten ([auth]) werden bewusst NICHT zurückgegeben.
      */
     private function cmdConfig(): array
     {
+        // Nur LESEN — das darf jedes angemeldete Konto. Die Antwort enthält
+        // keine Geheimnisse (Schlüssel und Passwörter erscheinen ausschließlich
+        // als „…Configured"-Flag). Geschrieben wird über cmdReconfigure, und das
+        // verlangt config.manage.
         $this->requireAuth();
         if ($this->configPath === null) {
             throw new ApiException('ECONFIG', 409, 'RECONFIGURE-UNAVAILABLE');
@@ -2999,6 +3071,12 @@ final class Connector
         $raw = Config::raw($this->configPath);
 
         return [
+            // Anmeldeverfahren. `authUserCount` sagt dem Dialog, ob beim Wechsel
+            // auf multiuser noch ein Konto aus dem Einzelbenutzer entsteht oder
+            // ob bereits Konten liegen (dann gelten die).
+            'authDriver'    => strtolower(trim((string) ($raw['auth']['driver'] ?? 'singleuser'))),
+            'authDrivers'   => self::AUTH_DRIVERS,
+            'authUserCount' => count((new UserStore(dirname($this->configPath) . '/users'))->all()),
             'sessionPath' => $raw['session']['path'] ?? '',
             'logFile'     => $raw['log']['file'] ?? '',
             'logLevel'    => $raw['log']['level'] ?? 'warning',
@@ -3061,7 +3139,7 @@ final class Connector
      */
     private function cmdReconfigure(array $request): array
     {
-        $this->requireAuth();
+        $this->requireConfigAdmin();
         $this->requireMethod('POST');
         if ($this->configPath === null) {
             throw new ApiException('ECONFIG', 409, 'RECONFIGURE-UNAVAILABLE');
@@ -3075,6 +3153,9 @@ final class Connector
         }
         $hugoBin = self::cleanConfigValue($request['hugoBin'] ?? '', 'hugoBin', false);
         $hugoClean = filter_var($request['hugoClean'] ?? false, FILTER_VALIDATE_BOOLEAN);
+
+        // Anmeldeverfahren (optional; fehlt das Feld, bleibt alles wie es ist).
+        $authSection = $this->authSectionForDriver($request['authDriver'] ?? null);
 
         // KI-Assistent. Der API-Schlüssel ist ein Geheimnis: ein leeres Feld
         // lässt den bestehenden unverändert; nur eine Eingabe ersetzt ihn.
@@ -3203,7 +3284,7 @@ final class Connector
             }
         }
 
-        Config::updateSections($this->configPath, [
+        $sections = [
             'session' => ['path' => $sessionPath],
             'log'     => ['file' => $logFile, 'level' => $logLevel],
             'hugo'    => $hugoSection,
@@ -3215,7 +3296,14 @@ final class Connector
             'mail'    => $mailSection,
             // Ohne zusätzliche Präfixe/Dateien keine [seo_report]-Sektion.
             'seo_report' => $seoSection,
-        ]);
+        ];
+        // [auth] NUR bei einem Treiberwechsel mitgeben. Den Schlüssel immer zu
+        // setzen wäre gefährlich: updateSections deutet null als „Sektion
+        // entfernen" — die Anmeldedaten wären damit weg.
+        if ($authSection !== null) {
+            $sections = ['auth' => $authSection] + $sections;
+        }
+        Config::updateSections($this->configPath, $sections);
         $this->logger->info('Konfiguration aktualisiert (reconfigure).');
 
         return ['ok' => true];
@@ -3266,7 +3354,7 @@ final class Connector
      */
     private function cmdAiModels(): array
     {
-        $this->requireAuth();
+        $this->requireConfigAdmin();
         $this->requireMethod('POST');
         if ($this->configPath === null) {
             throw new ApiException('ECONFIG', 409, 'RECONFIGURE-UNAVAILABLE');
@@ -3506,31 +3594,342 @@ final class Connector
     }
 
     /**
-     * Merkt die Benutzerwahl, ob beim Speichern das Front-Matter-Feld `lastmod`
-     * auf die aktuelle Zeit gesetzt werden soll, in [user] update_lastmod. Die
-     * übrigen [user]-Werte (session_lifetime, content_width) bleiben erhalten:
-     * updateSections ersetzt die ganze Sektion, deshalb werden sie roh gelesen
-     * und wieder mitgeschrieben.
+     * Die WIRKSAMEN [user]-Einstellungen: die des angemeldeten Benutzers, sonst
+     * die globalen Vorgaben aus der hugocms.ini.
+     *
+     * Wo die Einstellungen liegen, weiß allein der Auth-Treiber — beim
+     * Einzelbenutzer in der hugocms.ini, beim Mehrbenutzer in der Datei des
+     * jeweiligen Kontos. Einmal je Request ermittelt.
+     *
+     * @return array{sessionLifetime: int, contentWidth: int, toolbarCollapsed: bool, updateLastmod: ?bool}
      */
-    private function cmdSetUpdateLastmod(array $request): array
+    private function userPrefs(): array
+    {
+        if ($this->userPrefs !== null) {
+            return $this->userPrefs;
+        }
+        if ($this->auth->isAuthenticated() && $this->auth->supportsPreferences()) {
+            // Was die Kontodatei nicht führt, fällt auf die globalen Vorgaben
+            // der hugocms.ini zurück.
+            return $this->userPrefs = Config::userSection($this->auth->loadPreferences(), $this->user);
+        }
+
+        return $this->userPrefs = $this->user;
+    }
+
+    /**
+     * Schreibt die Einstellungen der [user]-Sektion — beim Einzelbenutzer in die
+     * hugocms.ini, beim Mehrbenutzer in die Datei des angemeldeten Kontos:
+     *
+     *   contentWidth     Breite des Hauptfensters in px (content_width)
+     *   toolbarCollapsed Werkzeugleiste eingeklappt (toolbar_collapsed)
+     *   sessionLifetime  Sitzungsdauer in STUNDEN (session_lifetime)
+     *   updateLastmod    lastmod beim Speichern setzen (update_lastmod);
+     *                    null entfernt den Schlüssel = im Editor nachfragen
+     *
+     * Jedes Feld ist einzeln optional; nur mitgegebene Felder werden
+     * geschrieben, die übrigen [user]-Werte bleiben unberührt. Die ersten
+     * beiden schickt die Oberfläche selbsttätig (Ende eines Greifrand-Zugs,
+     * Umschalten der Werkzeugleiste), die letzten beiden stammen aus dem
+     * Konto-Dialog.
+     */
+    private function cmdSetUserPrefs(array $request): array
     {
         $this->requireAuth();
         $this->requireMethod('POST');
-        if ($this->configPath === null) {
+
+        $changes = [];
+
+        if (array_key_exists('contentWidth', $request)) {
+            $width = $request['contentWidth'];
+            if (!is_int($width) && !(is_string($width) && ctype_digit($width))) {
+                throw ApiException::badRequest('PARAM-INVALID', ['contentWidth']);
+            }
+            $width = (int) $width;
+            if ($width < Config::MIN_CONTENT_WIDTH || $width > Config::MAX_CONTENT_WIDTH) {
+                throw ApiException::badRequest('PARAM-INVALID', ['contentWidth']);
+            }
+            $changes['content_width'] = (string) $width;
+        }
+
+        if (array_key_exists('toolbarCollapsed', $request)) {
+            $collapsed = $request['toolbarCollapsed'];
+            if (!is_bool($collapsed)) {
+                throw ApiException::badRequest('PARAM-INVALID', ['toolbarCollapsed']);
+            }
+            $changes['toolbar_collapsed'] = $collapsed ? 'true' : 'false';
+        }
+
+        if (array_key_exists('sessionLifetime', $request)) {
+            $hours = $request['sessionLifetime'];
+            if (!is_int($hours) && !is_float($hours) && !(is_string($hours) && is_numeric($hours))) {
+                throw ApiException::badRequest('PARAM-INVALID', ['sessionLifetime']);
+            }
+            $hours = (float) $hours;
+            if ($hours < self::MIN_SESSION_LIFETIME_HOURS || $hours > self::MAX_SESSION_LIFETIME_HOURS) {
+                throw ApiException::badRequest('PARAM-INVALID', ['sessionLifetime']);
+            }
+            // Ganze Stunden ohne Nachkommastellen schreiben — die INI bleibt so
+            // lesbar wie von Hand gepflegt.
+            $changes['session_lifetime'] = $hours == (int) $hours
+                ? (string) (int) $hours
+                : rtrim(rtrim(number_format($hours, 2, '.', ''), '0'), '.');
+        }
+
+        if (array_key_exists('updateLastmod', $request)) {
+            $lastmod = $request['updateLastmod'];
+            if ($lastmod !== null && !is_bool($lastmod)) {
+                throw ApiException::badRequest('PARAM-INVALID', ['updateLastmod']);
+            }
+            // null entfernt den Schlüssel: Der Editor fragt dann wieder nach.
+            $changes['update_lastmod'] = $lastmod === null ? null : ($lastmod ? 'true' : 'false');
+        }
+
+        if ($changes === []) {
+            throw ApiException::badRequest('PARAM-MISSING', ['contentWidth']);
+        }
+
+        if (!$this->auth->supportsPreferences()) {
             throw new ApiException('ECONFIG', 409, 'RECONFIGURE-UNAVAILABLE');
         }
-        $value = $request['value'] ?? null;
-        if (!is_bool($value)) {
-            throw ApiException::badRequest('PARAM-INVALID', ['value']);
+        $this->auth->savePreferences($changes);
+        $this->userPrefs = null; // beim nächsten Zugriff frisch vom Treiber
+        $this->logger->info('Benutzereinstellungen gespeichert: ' . implode(', ', array_keys($changes)));
+
+        return ['ok' => true, 'ui' => $this->uiState()];
+    }
+
+    /**
+     * Die für den Client sichtbaren [user]-Werte. Genau dieser Block steckt auch
+     * in der whoami-Antwort, damit beide Wege denselben Zustand melden.
+     *
+     * @return array<string, mixed>
+     */
+    private function uiState(): array
+    {
+        $prefs = $this->userPrefs();
+
+        return [
+            'contentWidth' => $prefs['contentWidth'],
+            'toolbarCollapsed' => $prefs['toolbarCollapsed'],
+            // Sitzungsdauer in STUNDEN — so steht sie in der INI und so zeigt
+            // der Konto-Dialog sie an (intern rechnet der Connector in Sekunden).
+            'sessionLifetimeHours' => round($prefs['sessionLifetime'] / 3600, 2),
+            // Dreiwertig: null = beim Speichern nach lastmod-Aktualisierung
+            // fragen; true/false = ohne Nachfrage anwenden.
+            'updateLastmod' => $prefs['updateLastmod'],
+        ];
+    }
+
+    // ---- Kontenverwaltung (nur Mehrbenutzer, nur Rolle admin) --------------
+    //
+    // Der Connector reicht die Befehle nur durch: WER was darf, entscheidet der
+    // Treiber (UserAdminInterface). Bringt der Treiber die Schnittstelle nicht
+    // mit — etwa der Einzelbenutzer —, gibt es diese Befehle schlicht nicht.
+
+    /**
+     * Bereitet den Wechsel des Anmeldeverfahrens vor und liefert die zu
+     * schreibende [auth]-Sektion — oder null, wenn sich nichts ändert (dann
+     * bleibt die Sektion wörtlich stehen).
+     *
+     * Zum Mehrbenutzer hin bleiben `username` und `password_hash` erhalten:
+     * Daraus baut die AuthFactory beim nächsten Aufruf das erste
+     * Administratorkonto, sofern users/ noch leer ist.
+     *
+     * Zurück zum Einzelbenutzer wandern die Anmeldedaten des GERADE
+     * angemeldeten Kontos in die [auth]-Sektion. Ohne diesen Schritt gälte
+     * wieder der alte Stand aus der Zeit vor der Umstellung — wer sein Passwort
+     * seither geändert hat, käme nicht mehr herein. Die Kontodateien bleiben
+     * liegen; ein erneuter Wechsel zum Mehrbenutzer findet sie unverändert vor.
+     *
+     * @return ?array<string, string>
+     */
+    private function authSectionForDriver(mixed $requested): ?array
+    {
+        if ($requested === null) {
+            return null; // Feld nicht mitgeschickt — Verfahren unverändert
+        }
+        $driver = strtolower(trim((string) $requested));
+        if (!in_array($driver, self::AUTH_DRIVERS, true)) {
+            throw ApiException::badRequest('AUTH-DRIVER-UNKNOWN', [$driver]);
+        }
+        $raw = Config::raw((string) $this->configPath)['auth'] ?? [];
+        $current = strtolower(trim((string) ($raw['driver'] ?? 'singleuser')));
+        if ($driver === $current) {
+            return null;
         }
 
-        $user = Config::raw($this->configPath)['user'] ?? [];
-        $user['update_lastmod'] = $value ? 'true' : 'false';
-        Config::updateSections($this->configPath, ['user' => $user]);
-        $this->user['updateLastmod'] = $value;
-        $this->logger->info('Benutzereinstellung update_lastmod: ' . ($value ? 'true' : 'false'));
+        if ($driver === 'multiuser') {
+            return array_merge($raw, ['driver' => 'multiuser']);
+        }
 
-        return ['ok' => true, 'updateLastmod' => $value];
+        // → singleuser: Das eigene Konto wird zum Einzelbenutzer.
+        $name = (string) ($this->auth->currentUser()['name'] ?? '');
+        $account = (new UserStore(dirname((string) $this->configPath) . '/users'))->load($name);
+        if ($account === null) {
+            throw new ApiException('ECONFIG', 409, 'AUTH-SINGLEUSER-NO-ACCOUNT');
+        }
+
+        return array_merge($raw, [
+            'driver' => 'singleuser',
+            'username' => $account['name'],
+            'password_hash' => $account['hash'],
+        ]);
+    }
+
+    /**
+     * Verlangt die Befugnis, die INSTALLATION zu konfigurieren: hugocms.ini
+     * (Anmeldeverfahren, Verzeichnisse, Log, Hugo, Schlüssel) und die Lizenz.
+     * Beim Einzelbenutzer trifft das immer zu — es gibt nur ein Konto. Beim
+     * Mehrbenutzer ist es der Rolle „admin" vorbehalten: Ein Redakteur soll
+     * Inhalte pflegen, nicht das Anmeldeverfahren umstellen oder Schlüssel
+     * austauschen.
+     *
+     * NICHT betroffen sind die Einstellungen einer einzelnen WEBSEITE
+     * (projectconfig/projectreconfigure) — die gehören zur redaktionellen
+     * Arbeit und stehen jedem angemeldeten Konto offen.
+     */
+    private function requireConfigAdmin(): void
+    {
+        $this->requireAuth();
+        if (!$this->auth->can('config.manage')) {
+            throw ApiException::denied('CONFIG-ADMIN-REQUIRED');
+        }
+    }
+
+    /**
+     * Der Treiber als Kontenverwaltung, oder ein klarer Fehler.
+     */
+    private function userAdmin(): UserAdminInterface
+    {
+        $this->requireAuth();
+        if (!$this->auth instanceof UserAdminInterface) {
+            throw new ApiException('ECONFIG', 409, 'USERS-NOT-SUPPORTED');
+        }
+
+        return $this->auth;
+    }
+
+    /**
+     * users — alle Konten samt der Webseiten, die diese Installation kennt
+     * (Auswahlliste für die Zuordnung).
+     */
+    private function cmdUsers(): array
+    {
+        $admin = $this->userAdmin();
+
+        return [
+            'users' => $admin->listUsers(),
+            'sites' => $this->knownSites(),
+            'roles' => [UserAdminInterface::ROLE_ADMIN, UserAdminInterface::ROLE_EDITOR],
+        ];
+    }
+
+    private function cmdUserCreate(array $request): array
+    {
+        $admin = $this->userAdmin();
+        $this->requireMethod('POST');
+
+        $username = (string) ($request['username'] ?? '');
+        $password = (string) ($request['password'] ?? '');
+        if (strlen($password) < self::MIN_PASSWORD_LENGTH) {
+            throw ApiException::badRequest('SETUP-PASSWORD-TOO-SHORT', [self::MIN_PASSWORD_LENGTH]);
+        }
+        $admin->createUser(
+            $username,
+            $password,
+            (string) ($request['role'] ?? UserAdminInterface::ROLE_EDITOR),
+            $this->requestSites($request),
+        );
+        $this->logger->info('Benutzerkonto angelegt: ' . $username);
+
+        return ['ok' => true, 'users' => $admin->listUsers()];
+    }
+
+    private function cmdUserUpdate(array $request): array
+    {
+        $admin = $this->userAdmin();
+        $this->requireMethod('POST');
+
+        $username = (string) ($request['username'] ?? '');
+        $disabled = array_key_exists('disabled', $request) ? $request['disabled'] : null;
+        if ($disabled !== null && !is_bool($disabled)) {
+            throw ApiException::badRequest('PARAM-INVALID', ['disabled']);
+        }
+        $admin->updateUser(
+            $username,
+            array_key_exists('role', $request) ? (string) $request['role'] : null,
+            array_key_exists('sites', $request) ? $this->requestSites($request) : null,
+            $disabled,
+        );
+        $this->logger->info('Benutzerkonto geändert: ' . $username);
+
+        return ['ok' => true, 'users' => $admin->listUsers()];
+    }
+
+    /** Setzt das Passwort eines FREMDEN Kontos neu („Passwort vergessen"). */
+    private function cmdUserPassword(array $request): array
+    {
+        $admin = $this->userAdmin();
+        $this->requireMethod('POST');
+
+        $username = (string) ($request['username'] ?? '');
+        $password = (string) ($request['password'] ?? '');
+        if (strlen($password) < self::MIN_PASSWORD_LENGTH) {
+            throw ApiException::badRequest('SETUP-PASSWORD-TOO-SHORT', [self::MIN_PASSWORD_LENGTH]);
+        }
+        $admin->resetPassword($username, $password);
+        $this->logger->info('Passwort zurückgesetzt für: ' . $username);
+
+        return ['ok' => true];
+    }
+
+    private function cmdUserDelete(array $request): array
+    {
+        $admin = $this->userAdmin();
+        $this->requireMethod('POST');
+
+        $username = (string) ($request['username'] ?? '');
+        $admin->deleteUser($username);
+        $this->logger->info('Benutzerkonto gelöscht: ' . $username);
+
+        return ['ok' => true, 'users' => $admin->listUsers()];
+    }
+
+    /**
+     * Webseiten-Zuordnung aus der Anfrage: eine Liste von Hosts oder ["*"].
+     *
+     * @return list<string>
+     */
+    private function requestSites(array $request): array
+    {
+        $sites = $request['sites'] ?? [];
+        if (!is_array($sites)) {
+            throw ApiException::badRequest('PARAM-INVALID', ['sites']);
+        }
+
+        return array_values(array_map('strval', $sites));
+    }
+
+    /**
+     * Hosts aller Webseiten dieser Installation — aus den Kopfzeilen der
+     * Mount-Konfigurationen. Der eigene Host ist immer dabei, auch wenn die
+     * Installation (noch) über den Rückfall mounts.ini läuft.
+     *
+     * @return list<string>
+     */
+    private function knownSites(): array
+    {
+        $sites = $this->configPath !== null
+            ? SiteKey::knownHosts(dirname($this->configPath) . '/mounts')
+            : [];
+        $own = SiteKey::host($_SERVER);
+        if ($own !== '' && !in_array($own, $sites, true)) {
+            $sites[] = $own;
+            sort($sites, SORT_NATURAL);
+        }
+
+        return $sites;
     }
 
     /**
@@ -3833,7 +4232,7 @@ final class Connector
      */
     private function cmdActivate(array $request): array
     {
-        $this->requireAuth();
+        $this->requireConfigAdmin();
         $this->requireMethod('POST');
         if ($this->mountsPath === null) {
             // Programmatische Konfiguration (custom.php): keine Datei zum Schreiben.

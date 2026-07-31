@@ -87,6 +87,18 @@ Volle Git-Versionierung pro Seite: Was hat sich geändert, wer, wann — Verlauf
 Diff, Commit, Push, alles über einen Knopf. Jede Veröffentlichung wird
 nachvollziehbar, jeder Stand wiederherstellbar.
 
+**Ein Team statt eines Zugangs.** _(Pro)_
+Statt eines gemeinsamen Passworts bekommt jeder sein eigenes Konto. Zwei Rollen,
+mehr braucht es nicht: **Administratoren** sehen alle Seiten, legen Konten an,
+sperren sie und vergeben vergessene Passwörter neu. **Redakteure** arbeiten an
+genau den Seiten, die du ihnen zuweist — betreust du mehrere Kunden auf einer
+Installation, sieht jeder nur seine eigene. Jedes Konto bringt seine eigenen
+Einstellungen mit: Fensterbreite, Sitzungsdauer, eingeklappte Werkzeugleiste.
+
+Umstellen ist eine Zeile in der `hugocms.ini` — dein bisheriger Zugang wird dabei
+automatisch zum ersten Administrator, mit unverändertem Passwort. Danach legst du
+weitere Konten im Browser an (Werkzeugleiste → **Benutzer verwalten**).
+
 **Und der ganze Redaktionsalltag drumherum.**
 Inhalte, Vorlagen und Medien getrennt und aufgeräumt. Hochladen per
 Ziehen-und-Ablegen, Bildvorschauen, Papierkorb mit Wiederherstellung, Suche über
@@ -160,6 +172,62 @@ Aufruf legst du dein Konto an.
 > Seite. Ideal, um viele Kundenseiten aus einer Hand zu betreuen.
 
 <a name="immer-aktuell"></a>
+## Mehrere Redakteure einrichten _(Pro)_
+
+Solange du allein arbeitest, brauchst du nichts zu tun — ein Zugang genügt. Sobald
+mehrere Personen an der Seite arbeiten sollen:
+
+**1. Umstellen.** Im Browser: Werkzeugleiste → **Konfiguration ändern** →
+Abschnitt *Anmeldung* → „Mehrere Konten mit Rollen". Der Dialog sagt dir vorher,
+was passiert. Alternativ von Hand in `backend/hugocms.ini`:
+
+```ini
+[auth]
+driver = multiuser
+```
+
+Die Zeilen `username` und `password_hash` bleiben stehen. HugoCMS legt daraus
+dein Administratorkonto an — gleicher Name, gleiches Passwort. Du bleibst
+angemeldet und musst nichts neu eingeben.
+
+Der Weg zurück geht genauso: Stellst du wieder auf einen Zugang um, wird dein
+aktuelles Konto der alleinige Zugang — mit dem Passwort, das du **jetzt**
+benutzt, nicht dem von damals. Die übrigen Konten können sich dann nicht mehr
+anmelden, gelöscht werden sie aber nicht.
+
+**2. Konten anlegen.** In der Werkzeugleiste links erscheint jetzt **Benutzer
+verwalten** (nur für Administratoren sichtbar). Dort legst du Konten an und
+entscheidest je Konto:
+
+| | |
+|---|---|
+| **Rolle** | *Administrator* — alle Seiten, darf Konten verwalten · *Redakteur* — nur die zugewiesenen Seiten |
+| **Webseiten** | Alle, oder eine Auswahl aus den Seiten dieser Installation |
+| **Sperren** | Zugang vorübergehend stilllegen, ohne das Konto zu löschen |
+| **Passwort** | Vergessen? Du vergibst ein neues und teilst es dem Benutzer mit — es gibt bewusst keine E-Mail-Zurücksetzung |
+
+**Was Redakteure NICHT können:** Konten anlegen, löschen oder fremde Passwörter
+ändern; und die Konfiguration der Installation sowie die Lizenz nicht speichern.
+Die Konfiguration **einsehen** dürfen sie — der Dialog öffnet sich, alle Felder
+sind aber gesperrt und ein Hinweis erklärt, warum. Schlüssel und Passwörter
+stehen dort ohnehin nie im Klartext.
+
+Die **Projekteinstellungen** einer Webseite (SEO-Ausschlüsse, KI-Verbesserer,
+Cron-Pausen, Analyse-Adressen) stehen ihnen dagegen voll offen — die gehören zur
+Arbeit an der Seite selbst. Was sie in *ihren* Seiten tun dürfen, hängt wie gehabt an den Ordner-
+Einstellungen der jeweiligen Seite (Lesen, Schreiben, Hochladen, Löschen) — die
+Rolle steuert nur, welche Seiten sie überhaupt sehen.
+
+> **Braucht eine Pro-Lizenz.** Ohne gültige Lizenz kannst du Konten zwar anlegen,
+> anmelden können sich aber nur Administratoren. Das ist Absicht: Eine
+> abgelaufene Lizenz sperrt dich nie aus deiner eigenen Installation aus — du
+> kommst herein und kannst sie eintragen.
+
+Du kommst nicht versehentlich an dein eigenes Konto: Das letzte
+Administratorkonto lässt sich weder löschen noch herabstufen noch sperren, und
+dein eigenes Passwort änderst du wie bisher unter **Konto und Einstellungen** —
+dort mit Bestätigung durch das alte Passwort.
+
 ## Immer aktuell
 
 HugoCMS ist ein **Rolling Release** — fortlaufende Verbesserungen, keine
@@ -182,6 +250,9 @@ bin/update.sh --dry-run    # nur anzeigen, was geschähe
 - Geheimnisse (Passwort-Hash, API-Schlüssel) verlassen das Backend nie und
   erscheinen in keinem Formular. Enthält die Konfiguration einen Schlüssel,
   schütze die Datei mit `0640`.
+- Passwörter werden **nur als Hash** gespeichert — auch die der weiteren Konten.
+  Das Klartextpasswort kennt HugoCMS zu keinem Zeitpunkt; deshalb kann auch ein
+  Administrator ein vergessenes Passwort nur *neu vergeben*, nicht anzeigen.
 
 Und weil online nur statisches HTML liegt, gibt es schlicht **nichts, was ein
 Angreifer ausführen könnte** — die stärkste Sicherheitsmaßnahme ist die, die man

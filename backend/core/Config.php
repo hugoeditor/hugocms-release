@@ -18,6 +18,8 @@ use HugoCMS\FileManager\Exception\ApiException;
  *
  *   [user]
  *   session_lifetime = 8   ; Sitzungsdauer in Stunden (optional; Standard 8)
+ *   content_width = 1200   ; Breite des Hauptfensters in px (optional)
+ *   toolbar_collapsed = false ; Werkzeugleiste eingeklappt starten (optional)
  *   update_lastmod = false ; lastmod beim Speichern setzen (optional; fehlt =
  *                          ; im Editor nachfragen)
  *
@@ -41,15 +43,22 @@ final class Config
     private const DEFAULT_SESSION_LIFETIME = 28800;
 
     /** Standard-Inhaltsbreite in px, falls [user] content_width fehlt. */
-    private const DEFAULT_CONTENT_WIDTH = 1200;
+    public const DEFAULT_CONTENT_WIDTH = 1200;
 
     /** Untergrenze für content_width; kleinere Werte fallen auf den Standard zurück. */
-    private const MIN_CONTENT_WIDTH = 320;
+    public const MIN_CONTENT_WIDTH = 320;
+
+    /**
+     * Obergrenze für eine vom Client GESPEICHERTE content_width (Plausibilität).
+     * Beim Lesen gilt sie nicht — ein von Hand eingetragener größerer Wert bleibt
+     * wirksam.
+     */
+    public const MAX_CONTENT_WIDTH = 5000;
 
     /**
      * @return array{
      *   auth: array<string, mixed>,
-     *   user: array{sessionLifetime: int, contentWidth: int, updateLastmod: ?bool},
+     *   user: array{sessionLifetime: int, contentWidth: int, toolbarCollapsed: bool, updateLastmod: ?bool},
      *   session: array{path: string},
      *   log: array{file: string, level: string, maxBytes: int, keep: int},
      *   hugoBin: ?string,
@@ -263,28 +272,53 @@ final class Config
      *
      * content_width: Breite des zentrierten Hauptfensters in PIXELN auf großen
      * Bildschirmen. Fehlt der Wert oder ist er zu klein, gilt der Standard 1200.
-     * Im Einzelbenutzer-Modus ist dies der Startwert nach jedem Neuladen.
+     * Im Einzelbenutzer-Modus ist dies zugleich der Startwert nach jedem Neuladen
+     * und der Speicherort für eine per Greifrand gezogene Breite.
      *
-     * @return array{sessionLifetime: int, contentWidth: int, updateLastmod: ?bool}  sessionLifetime in Sekunden
+     * toolbar_collapsed: ob die vertikale Werkzeugleiste auf Desktop-Breite
+     * eingeklappt startet. Fehlt der Wert, startet sie ausgeklappt.
+     *
+     * Öffentlich, weil dieselbe Normalisierung auch für die Einstellungen gilt,
+     * die ein Auth-Treiber je Benutzer vorhält (Mehrbenutzer: users/<hash>.ini).
+     * $defaults trägt dann die globalen Vorgaben aus der hugocms.ini: Was in der
+     * Datei EINES Kontos fehlt, fällt darauf zurück — sonst verlöre ein frisch
+     * angelegtes Konto (und jedes beim Umstieg übernommene) die installations-
+     * weiten Vorgaben.
+     *
+     * @param ?array{sessionLifetime: int, contentWidth: int, toolbarCollapsed: bool, updateLastmod: ?bool} $defaults
+     *
+     * @return array{sessionLifetime: int, contentWidth: int, toolbarCollapsed: bool, updateLastmod: ?bool}  sessionLifetime in Sekunden
      */
-    private static function userSection(mixed $section): array
+    public static function userSection(mixed $section, ?array $defaults = null): array
     {
         $section = is_array($section) ? $section : [];
+        $defaultSeconds = $defaults['sessionLifetime'] ?? self::DEFAULT_SESSION_LIFETIME;
+        $defaultWidth = $defaults['contentWidth'] ?? self::DEFAULT_CONTENT_WIDTH;
+
         $hours = isset($section['session_lifetime']) ? (float) $section['session_lifetime'] : 0.0;
-        $seconds = $hours > 0 ? (int) round($hours * 3600) : self::DEFAULT_SESSION_LIFETIME;
+        $seconds = $hours > 0 ? (int) round($hours * 3600) : $defaultSeconds;
 
         $width = isset($section['content_width']) ? (int) $section['content_width'] : 0;
         if ($width < self::MIN_CONTENT_WIDTH) {
-            $width = self::DEFAULT_CONTENT_WIDTH;
+            $width = $defaultWidth;
         }
+
+        $toolbarCollapsed = isset($section['toolbar_collapsed'])
+            ? filter_var($section['toolbar_collapsed'], FILTER_VALIDATE_BOOLEAN)
+            : ($defaults['toolbarCollapsed'] ?? false);
 
         // update_lastmod ist dreiwertig: fehlt der Schlüssel (null), fragt der
         // Editor beim Speichern nach; true/false wenden das ohne Nachfrage an.
         $updateLastmod = isset($section['update_lastmod'])
             ? filter_var($section['update_lastmod'], FILTER_VALIDATE_BOOLEAN)
-            : null;
+            : ($defaults['updateLastmod'] ?? null);
 
-        return ['sessionLifetime' => $seconds, 'contentWidth' => $width, 'updateLastmod' => $updateLastmod];
+        return [
+            'sessionLifetime' => $seconds,
+            'contentWidth' => $width,
+            'toolbarCollapsed' => $toolbarCollapsed,
+            'updateLastmod' => $updateLastmod,
+        ];
     }
 
     /**
