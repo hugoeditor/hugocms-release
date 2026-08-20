@@ -1,0 +1,19 @@
+# Gebaute Dateien der App (URL /edit/assets/) — dauerhaft zwischenspeichern.
+#
+# Jede Datei hier trägt den Hash ihres Inhalts im Namen (index-Cp6X38FY.js);
+# ändert sich der Inhalt, ändert sich der Name, und die stets frisch geladene
+# index.html verweist auf den neuen. Ein Update kann also nicht hängen bleiben,
+# und der Browser spart sich bei jedem Start die Rückfragen.
+#
+# Bewusst dieses Verzeichnis statt einer Regel über Dateiendungen im
+# übergeordneten Verzeichnis: Nur was hier liegt, ist gehasht. Eine Datei aus
+# frontend/public/ landet ungehasht im Wurzelverzeichnis der App und würde von
+# einer Endungsregel ein Jahr lang festgehalten.
+#
+# Zum "unset" siehe die Erläuterung in ../.htaccess. Die dortigen CSP-Regeln
+# gelten hier mit; nur Cache-Control wird überschrieben.
+<IfModule mod_headers.c>
+    Header unset Cache-Control
+    Header always unset Cache-Control
+    Header always set Cache-Control "public, max-age=31536000, immutable"
+</IfModule>

@@ -1,16 +1,44 @@
-# App-Hülle (URL /edit/) — Caching-Steuerung.
-#
-# index.html: bei jedem Laden revalidieren (der Browser prüft per ETag), damit
-# ein neuer Build sofort erscheint. Content-gehashte Assets tragen je Build
-# einen neuen Dateinamen und werden daher unbegrenzt zwischengespeichert.
+# App-Hülle (URL /edit/) — Caching und Content-Security-Policy.
 #
 # Nginx wertet diese Datei NICHT aus — dort die location-Blöcke aus
 # beispiel-konfigurationen/nginx.conf verwenden.
+#
+# ----------------------------------------------------------------------------
+# Warum jede Regel hier mit "unset" beginnt
+# ----------------------------------------------------------------------------
+# Apache führt zwei Header-Tabellen: "Header set" schreibt in die eine (nur bei
+# erfolgreichen Antworten), "Header always set" in die andere (bei allen).
+# Beide werden bei einer 200er-Antwort gesendet. Setzt die Webseite denselben
+# Header in der anderen Tabelle als diese Datei, bekommt der Browser ZWEI
+# Header — bei der CSP gilt dann deren Schnittmenge, die Ausnahme für die App
+# bliebe wirkungslos.
+#
+# Deshalb werden beide Tabellen zuerst geleert und der Wert dann neu gesetzt.
+# Das Ergebnis hängt damit NICHT davon ab, wie die Webseite ihre eigenen Header
+# setzt: Diese Datei ist für alle Installationen identisch und muss nie
+# angepasst werden, wenn sich die Konfiguration der Webseite ändert.
 <IfModule mod_headers.c>
+    # index.html bei jedem Laden revalidieren (der Browser prüft per ETag),
+    # damit ein neuer Build sofort erscheint. Ohne diese Regel erbt die Datei
+    # die Cache-Vorgabe der Webseite — steht dort ein langes max-age, erreicht
+    # ein Update den Browser praktisch nie. Winzige Datei, vernachlässigbare
+    # Kosten. Die gehashten Dateien regelt assets/.htaccess.
     <Files "index.html">
-        Header set Cache-Control "no-cache"
+        Header unset Cache-Control
+        Header always unset Cache-Control
+        Header always set Cache-Control "no-cache"
     </Files>
-    <FilesMatch "\.(js|css|woff2?|ttf|eot|svg|png|jpe?g|gif|webp|avif|ico)$">
-        Header set Cache-Control "public, max-age=0, must-revalidate"
-    </FilesMatch>
+
+    # Die App ist ein eigenständiges Programm, keine Seite der Webseite — ihre
+    # CSP steht deshalb hier und nicht in der Webseiten-Konfiguration.
+    # Zu den beiden Lockerungen:
+    #   'unsafe-inline' bei style-src — Vuetify und eigene :style-Bindungen
+    #   setzen laufend style-Attribute.
+    #   'unsafe-eval' bei script-src — der Nachrichten-Compiler von vue-i18n
+    #   erzeugt die Übersetzungsfunktionen zur Laufzeit über Function().
+    # Setzt die Webseite "require-trusted-types-for 'script'", wird das hier
+    # mit ersetzt — die App könnte sonst nicht laufen.
+    Header unset Content-Security-Policy
+    Header always unset Content-Security-Policy
+    Header always set Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
 </IfModule>
