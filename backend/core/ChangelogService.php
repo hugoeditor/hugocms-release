@@ -78,12 +78,16 @@ final class ChangelogService
      * Front Matter: Der neueste Stand interessiert zuerst, und so muss niemand
      * an das Ende einer wachsenden Seite scrollen.
      *
-     * @param string  $message Vollständige Beschreibung des Standes (erste Zeile
-     *                         als Überschrift, Rest als Rumpf des Abschnitts).
-     * @param ?string $tag     Versionsnummer, wenn eine vergeben wurde.
+     * @param string  $message  Vollständige Beschreibung des Standes (erste Zeile
+     *                          als Überschrift, Rest als Rumpf des Abschnitts).
+     * @param ?string $tag      Versionsnummer, wenn eine vergeben wurde.
+     * @param string  $tagLabel Wort vor der Nummer in der Überschrift
+     *                          („Ausgabe“ / „Edition“). Sichtbarer Text und
+     *                          damit sprachabhängig — er kommt deshalb vom
+     *                          Client, wie die Beschreibung selbst.
      * @return bool true, wenn die Seite geschrieben wurde.
      */
-    public function append(string $message, ?string $tag = null): bool
+    public function append(string $message, ?string $tag = null, string $tagLabel = ''): bool
     {
         $message = trim($message);
         if ($message === '') {
@@ -102,7 +106,7 @@ final class ChangelogService
                 ? (string) $this->files->readText($target['mount'], $target['abs'])['content']
                 : '');
 
-            $merged = $this->merge($existing, $message, $tag);
+            $merged = $this->merge($existing, $message, $tag, $tagLabel);
             $this->files->writeText($target['mount'], $target['rel'], $target['abs'], $merged);
             // Für einen zweiten Eintrag im selben Vorgang (Vorab-Sicherung und
             // Wiederherstellung) ist ab jetzt dieser Stand die Grundlage.
@@ -119,14 +123,57 @@ final class ChangelogService
     }
 
     /**
+     * Erzeugt die Seite komplett NEU aus den übergebenen Versionsständen —
+     * neueste zuerst, ein Abschnitt je Stand. Der bisherige Inhalt wird dabei
+     * ersetzt; von Hand ergänzter Text geht verloren. Deshalb fragt der Client
+     * vorher nach.
+     *
+     * Anders als {@see append()} steht in jeder Überschrift das Datum des
+     * Standes, nicht die aktuelle Zeit — die Seite gibt die Historie wieder.
+     *
+     * @param list<array{tag: string, date: string, message: string}> $states
+     * @return int Anzahl geschriebener Abschnitte
+     */
+    public function rebuild(array $states, string $tagLabel = ''): int
+    {
+        $sections = [];
+        foreach ($states as $state) {
+            $message = trim((string) ($state['message'] ?? ''));
+            if ($message === '') {
+                continue;
+            }
+            $sections[] = $this->section(
+                $message,
+                (string) ($state['tag'] ?? ''),
+                $tagLabel,
+                (string) ($state['date'] ?? ''),
+            );
+        }
+
+        $page = $this->header() . "\n" . implode("\n", $sections);
+
+        try {
+            $target = $this->mounts->resolve($this->mounts->encodeId(self::MOUNT, self::FILE), false);
+            $this->files->writeText($target['mount'], $target['rel'], $target['abs'], $page);
+            $this->carry = $page;
+        } catch (ApiException | Throwable $e) {
+            $this->logger->warning('Änderungsprotokoll nicht erneuert: ' . $e->getMessage());
+
+            throw $e;
+        }
+
+        return count($sections);
+    }
+
+    /**
      * Fügt den neuen Abschnitt in die vorhandene Seite ein — oder legt sie an.
      * Der bestehende Rumpf bleibt wörtlich erhalten; angefasst wird nur das
      * `lastmod`-Datum im Front Matter, damit Hugo die Seite als aktualisiert
      * führt.
      */
-    private function merge(string $existing, string $message, ?string $tag): string
+    private function merge(string $existing, string $message, ?string $tag, string $tagLabel): string
     {
-        $section = $this->section($message, $tag);
+        $section = $this->section($message, $tag, $tagLabel);
 
         if (trim($existing) === '') {
             return $this->header() . "\n" . $section;
@@ -143,7 +190,7 @@ final class ChangelogService
     }
 
     /** Ein Abschnitt: Überschrift aus Versionsnummer und Datum, darunter der Text. */
-    private function section(string $message, ?string $tag): string
+    private function section(string $message, ?string $tag, string $tagLabel, string $date = ''): string
     {
         $lines = explode("\n", $message);
         $subject = trim(array_shift($lines));
@@ -151,10 +198,17 @@ final class ChangelogService
 
         // Die Überschrift trägt die Versionsnummer, wo es eine gibt — sie ist
         // das, was der Benutzer selbst vergeben hat und wiedererkennt. Sonst
-        // muss das Datum sie allein tragen.
-        $heading = $tag !== null && $tag !== ''
-            ? sprintf('## %s — %s', $tag, date('d.m.Y H:i'))
-            : sprintf('## %s', date('d.m.Y H:i'));
+        // muss das Datum sie allein tragen. Vor der Nummer steht das Wort aus
+        // $tagLabel („Ausgabe 3 — …“); fehlt es, bleibt die Nummer für sich.
+        $label = trim($tagLabel);
+        $number = $tag !== null ? trim($tag) : '';
+        $version = $number === '' ? '' : ($label === '' ? $number : $label . ' ' . $number);
+        // Beim Fortschreiben zählt der Augenblick, beim Neuerzeugen das Datum
+        // des Standes (ISO-8601 aus der Historie).
+        $stamp = $date === '' ? date('d.m.Y H:i') : self::formatDate($date);
+        $heading = $version !== ''
+            ? sprintf('## %s — %s', $version, $stamp)
+            : sprintf('## %s', $stamp);
 
         $section = $heading . "\n\n" . $subject . "\n";
         if ($rest !== '') {
@@ -162,6 +216,14 @@ final class ChangelogService
         }
 
         return $section;
+    }
+
+    /** ISO-8601-Zeitstempel in die Schreibweise der Überschriften bringen. */
+    private static function formatDate(string $iso): string
+    {
+        $ts = strtotime($iso);
+
+        return $ts === false ? date('d.m.Y H:i') : date('d.m.Y H:i', $ts);
     }
 
     /** Front Matter einer neu angelegten Seite. */
