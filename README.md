@@ -77,6 +77,14 @@ jeder Seite) bleibt dabei geschützt, damit nichts kaputtgeht. Mehrere Personen?
 HugoCMS bewahrt dich davor, versehentlich die Änderung eines anderen zu
 überschreiben.
 
+**Erst ansehen, dann veröffentlichen.**
+Ein Klick auf **Seitenvorschau** zeigt die Seite genau so, wie deine Besucher sie
+später sehen — mit deinem Theme, deinem Menü, deinen Schriften. Auch das, was du
+gerade erst getippt und noch nicht gespeichert hast. Die Vorschau öffnet sich in
+einem eigenen Fenster, ist nur für dich sichtbar und für Suchmaschinen
+unauffindbar. Du findest sie im Editor, im Kontextmenü des Dateimanagers und in
+der Freigabe-Warteschlange — dort auch für Seiten, die es noch gar nicht gibt.
+
 **Veröffentlichen ist ein Knopfdruck.**
 Ein Klick baut die ganze Seite neu und stellt sie live. Hugos Ergebnis —
 Statistik oder Fehlermeldung — erscheint sofort. Kein SSH, kein Deploy-Skript,
@@ -84,8 +92,16 @@ kein Warten.
 
 **Versionsgeschichte wie bei den Profis.** _(Pro)_
 Volle Git-Versionierung pro Seite: Was hat sich geändert, wer, wann — Verlauf,
-Diff, Commit, Push, alles über einen Knopf. Jede Veröffentlichung wird
-nachvollziehbar, jeder Stand wiederherstellbar.
+Unterschiede, Sichern, Hochladen, alles über einen Knopf. Jede Veröffentlichung
+wird nachvollziehbar, jeder Stand wiederherstellbar.
+
+Jeder gesicherte Stand bekommt auf Wunsch eine **Versionsnummer**, die von selbst
+weiterzählt — auch die nächtlichen Läufe. Dazu schreibt HugoCMS ein
+**Änderungsprotokoll** als ganz normale Seite deiner Webseite (`changelog.md`):
+je Ausgabe ein Abschnitt mit Datum, Beschreibung und den geänderten Dateien.
+Deine Besucher sehen also, was sich getan hat — und du musst nichts dafür tun.
+Ein Knopf baut das Protokoll bei Bedarf komplett aus der Versionsgeschichte neu
+auf.
 
 **Ein Team statt eines Zugangs.** _(Pro)_
 Statt eines gemeinsamen Passworts bekommt jeder sein eigenes Konto. Zwei Rollen,
@@ -102,7 +118,10 @@ weitere Konten im Browser an (Werkzeugleiste → **Benutzer verwalten**).
 **Und der ganze Redaktionsalltag drumherum.**
 Inhalte, Vorlagen und Medien getrennt und aufgeräumt. Hochladen per
 Ziehen-und-Ablegen, Bildvorschauen, Papierkorb mit Wiederherstellung, Suche über
-die ganze Seite. Anmeldung und Einstellungen jederzeit im Browser änderbar.
+die ganze Seite. Ein Knopf neben der Suche zeigt dir alle **Entwürfe** — die
+Seiten, an denen du noch arbeitest und die niemand sonst sieht. Im Editor setzt
+ein Knopf den Trenner, ab dem der Anreißer einer Seite endet. Anmeldung und
+Einstellungen jederzeit im Browser änderbar.
 
 ## In drei Minuten live
 
