@@ -77,6 +77,13 @@ password_hash = "HIER-PASSWORT-HASH-EINTRAGEN"
 ; Einstellungen" setzen — dort stellt „Jedes Mal nachfragen“ den Schlüssel
 ; wieder ab.
 ;update_lastmod = false
+; show_hidden: versteckte Dateien (Name beginnt mit einem Punkt) im
+; Dateimanager anzeigen. Optional; Standard false. Schaltbar über das
+; Kontextmenü des Dateimanagers und im Dialog „Konto und Einstellungen“ — beide
+; schreiben hierher (beim Mehrbenutzer in die Kontodatei). Der Papierkorb
+; (.trash) bleibt immer verborgen. Wirkt beim Mehrbenutzer nur für
+; Administratoren und für Konten mit allow_hidden = true.
+;show_hidden = false
 
 [session]
 ; Verzeichnis für die PHP-Sitzungsdateien (muss für den Webserver-Benutzer
@@ -116,6 +123,32 @@ bin = ../bin/hugo/hugo
 ; wenn im Zielordner weitere Dateien liegen. Standard: aus. Über den Dialog
 ; „Konfiguration ändern" schaltbar.
 ;clean = true
+
+;[editor]
+; Texteditor. Optional.
+;   extra_editable  Weitere Dateiendungen, die der Texteditor öffnen und
+;                   speichern darf — kommagetrennt, ohne Punkt. Sie ERGÄNZEN
+;                   die eingebauten (html, htm, md, markdown, txt, css, js,
+;                   json, xml, yaml, yml, svg, toml). Die accept-Liste des
+;                   jeweiligen Mounts gilt beim Speichern weiterhin.
+;                   VORSICHT bei Skripten (sh, php, py …): Führt der Server
+;                   oder ein Cron-Job sie aus, kann jeder mit Schreibrecht auf
+;                   den Mount — auch der KI-Assistent — Befehle auf dem Server
+;                   ausführen lassen.
+;extra_editable = sh
+
+;[system]
+; Verzeichnisauswahl („Orte verwalten“, nur Administratoren). Optional.
+;   browse_roots  Einstiegspunkte des Verzeichnis-Pickers: absolute Pfade,
+;                 kommagetrennt. Steht der Schlüssel hier, gilt ALLEIN diese
+;                 Liste — so lässt sich die Sicht auf einem gemeinsam
+;                 genutzten Server beschneiden. Außerhalb davon lässt sich
+;                 kein Ort anlegen, auch nicht per eingetipptem Pfad. Fehlt er,
+;                 gelten: das Release-Verzeichnis und sein Elternverzeichnis,
+;                 das Hugo-Projekt der Webseite, die Elternverzeichnisse der
+;                 vorhandenen Orte sowie /srv, /var/www, /mnt und /media.
+;                 Lässt sich auch im Dialog „Konfiguration ändern“ setzen.
+;browse_roots = /srv/www, /home/web
 
 ;[ai]
 ; KI-Assistent (Claude). Optional — ohne API-Schlüssel ist der Assistent aus.

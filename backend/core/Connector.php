@@ -10,6 +10,7 @@ use HugoCMS\FileManager\Audit\ContentQualityService;
 use HugoCMS\FileManager\Audit\RuleCatalog;
 use HugoCMS\FileManager\Audit\SourceGuesser;
 use HugoCMS\FileManager\Auth\AuthInterface;
+use HugoCMS\FileManager\Auth\FileTypeAwareInterface;
 use HugoCMS\FileManager\Auth\SessionCleaner;
 use HugoCMS\FileManager\Auth\SiteAwareInterface;
 use HugoCMS\FileManager\Auth\UserAdminInterface;
@@ -18,6 +19,9 @@ use HugoCMS\FileManager\Cron\Heartbeat;
 use HugoCMS\FileManager\Exception\ApiException;
 use HugoCMS\FileManager\Review\FrontMatter;
 use HugoCMS\FileManager\Review\ReviewStore;
+use HugoCMS\FileManager\Shop\ShopKey;
+use HugoCMS\FileManager\Shop\ShopSync;
+use HugoCMS\FileManager\Shop\ShopThumbnails;
 use Throwable;
 
 /**
@@ -131,6 +135,7 @@ final class Connector
         'contentWidth' => 1200,
         'toolbarCollapsed' => false,
         'updateLastmod' => null,
+        'showHidden' => false,
     ];
 
     /** Zwischenspeicher der wirksamen Einstellungen (einmal je Request). */
@@ -154,6 +159,12 @@ final class Connector
      */
     private array $seoReport = ['excludePrefixes' => [], 'excludeFiles' => []];
 
+    /** [system]-Sektion der hugocms.ini (Einstiegspunkte der Verzeichnisauswahl). */
+    private array $system = ['browseRoots' => []];
+
+    /** @var list<string> Endungen, die der Texteditor öffnet (Standard + [editor] extra_editable). */
+    private array $editableTypes = [];
+
     /**
      * Automatikmodus des Cron-Verbesserers aus der [improve]-Sektion der
      * Mount-Konfiguration (pro Webseite). Ist `auto` an, terminiert der Cron
@@ -173,6 +184,16 @@ final class Connector
      * @var array{pauseBuild: bool, pauseImprove: bool, pauseHealthcheck: bool}
      */
     private array $cronPause = ['pauseBuild' => false, 'pauseImprove' => false, 'pauseHealthcheck' => false];
+
+    /**
+     * Zugang der Shop-Anbindung (OpensourceERP) aus der [shop]-Sektion der
+     * Mount-Konfiguration: nur Hash, Kennung und Erzeugungszeit, nie der
+     * Schlüssel selbst ({@see ShopKey}).
+     *
+     * @var array{keyHash: ?string, keyHint: ?string, keyCreated: ?string, areas: list<string>, images: string, thumbnails: string}
+     */
+    private array $shop = ['keyHash' => null, 'keyHint' => null, 'keyCreated' => null, 'areas' => ShopSync::DEFAULT_AREAS,
+                           'images' => ShopThumbnails::DEFAULT_IMAGES, 'thumbnails' => ShopThumbnails::DEFAULT_THUMBNAILS];
 
     /**
      * Automatischer Commit rund um die zeitgesteuerte Veröffentlichung, aus der
@@ -256,6 +277,7 @@ final class Connector
         // Fehler-Handler noch nicht stehen.
         $authConfig = null;
         $authOptions = [];
+        $extraEditable = []; // zusätzliche Editor-Endungen aus [editor]
         $sessionPath = null;
         $this->configPath = isset($options['config']) ? (string) $options['config'] : null;
         if (isset($options['config'])) {
@@ -285,6 +307,8 @@ final class Connector
             $this->user = $cfg['user'];
             $this->mail = $cfg['mail'];
             $this->seoReport = $cfg['seoReport'];
+            $extraEditable = $cfg['editor']['extraEditable'];
+            $this->system = $cfg['system'];
             $authConfig = $cfg['auth'];
             // Globale [user]-Einstellungen an den Auth-Treiber durchreichen
             // (z. B. Sitzungsdauer für SingleUser).
@@ -339,11 +363,17 @@ final class Connector
         }
 
         $this->resolver = new MountResolver();
+        $this->editableTypes = $options['editable'] ?? array_values(array_unique([...FileService::DEFAULT_EDITABLE, ...$extraEditable]));
         $this->files = new FileService(
             $this->resolver,
-            $options['editable'] ?? ['html', 'htm', 'md', 'markdown', 'txt', 'css', 'js', 'json', 'xml', 'yaml', 'yml', 'svg', 'toml'],
+            $this->editableTypes,
             $options['maxEditableBytes'] ?? 5_242_880,
             $options['maxUploadBytes'] ?? 52_428_800,
+            // Dateityp-Einschränkung des angemeldeten Kontos — die Entscheidung
+            // fällt im Treiber; ohne Anmeldung (Cron) gibt es keine.
+            fn (): ?array => $this->auth instanceof FileTypeAwareInterface
+                ? $this->auth->allowedFileTypes()
+                : null,
         );
         $this->cors = $options['cors'] ?? null;
 
@@ -398,7 +428,19 @@ final class Connector
     {
         $config = MountConfig::load($configPath);
         foreach ($config['mounts'] as $spec) {
-            $this->mount($spec['name'], $spec['path'], $spec['options']);
+            try {
+                $this->mount($spec['name'], $spec['path'], $spec['options']);
+            } catch (ApiException $e) {
+                if ($e->messageKey() !== 'MOUNT-PATH-PROTECTED') {
+                    throw $e;
+                }
+                // Ein Mount, der das backend/ erreicht, wird übersprungen statt
+                // die ganze Installation lahmzulegen — der Administrator muss
+                // die Mount-Datei von Hand korrigieren können und sieht den
+                // Hinweis nach der Anmeldung.
+                $this->logger->warning('Mount "' . $spec['name'] . '" übersprungen: enthält das backend/ oder liegt darin.');
+                $this->addSetupWarning('MOUNT-PROTECTED-SKIPPED', [$spec['name']]);
+            }
         }
         // Pro-Lizenz dieser Webseite und das Ziel künftiger Aktivierungen.
         $this->mountsPath = $configPath;
@@ -427,6 +469,8 @@ final class Connector
         $this->cronPause = $config['cron'];
         // Automatischer Commit nach der Veröffentlichung.
         $this->gitAuto = $config['git'];
+        // Zugang der Shop-Anbindung.
+        $this->shop = $config['shop'];
         foreach ($config['warnings'] as $warning) {
             $this->addSetupWarning($warning['key'], $warning['params']);
         }
@@ -525,6 +569,11 @@ final class Connector
                 'liveanalyzeexport' => $this->cmdLiveAnalyzeExport($request),
                 'config' => $this->cmdConfig(),
                 'reconfigure' => $this->cmdReconfigure($request),
+                'mountadmin' => $this->cmdMountAdmin(),
+                'mountadd' => $this->cmdMountAdd($request),
+                'mountrename' => $this->cmdMountRename($request),
+                'mountdelete' => $this->cmdMountDelete($request),
+                'browsedirs' => $this->cmdBrowseDirs($request),
                 'aimodels' => $this->cmdAiModels(),
                 'projectconfig' => $this->cmdProjectConfig(),
                 'projectreconfigure' => $this->cmdProjectReconfigure($request),
@@ -572,6 +621,17 @@ final class Connector
                 'reviewget' => $this->cmdReviewGet($request),
                 'reviewapprove' => $this->cmdReviewApprove($request),
                 'reviewdiscard' => $this->cmdReviewDiscard($request),
+                // Shop-Anbindung: shopbuild und shopbuildstatus ruft
+                // OpensourceERP mit Schlüssel auf, die beiden anderen ein
+                // angemeldeter Administrator in den Projekteinstellungen.
+                'shopbuild' => $this->cmdShopBuild(),
+                'shopbuildstatus' => $this->cmdShopBuildStatus(),
+                'shopmanifest' => $this->cmdShopManifest($request),
+                'shopupload' => $this->cmdShopUpload($request),
+                'shopcommit' => $this->cmdShopCommit($request),
+                'shopthumbnails' => $this->cmdShopThumbnails($request),
+                'shopkeycreate' => $this->cmdShopKeyCreate(),
+                'shopkeydelete' => $this->cmdShopKeyDelete(),
                 default => throw ApiException::badRequest('UNKNOWN-COMMAND', [$cmd]),
             };
 
@@ -895,8 +955,18 @@ final class Connector
 
         return [
             'cwd' => $cwd,
-            'entries' => $this->files->listDir($target['mount'], $target['rel'], $target['abs']),
+            'entries' => $this->files->listDir($target['mount'], $target['rel'], $target['abs'], $this->showHidden()),
         ];
+    }
+
+    /**
+     * Versteckte Dateien zeigen? Nur wenn das Konto es wünscht (show_hidden)
+     * UND darf (AuthInterface::HIDDEN_FILES). Nimmt ein Administrator die
+     * Freigabe zurück, gilt ein gespeichertes show_hidden = true nicht mehr.
+     */
+    private function showHidden(): bool
+    {
+        return $this->userPrefs()['showHidden'] && $this->auth->can(AuthInterface::HIDDEN_FILES);
     }
 
     private function cmdRead(array $request): array
@@ -1381,7 +1451,7 @@ final class Connector
             throw ApiException::denied('OPERATION-NOT-ALLOWED', ['build']);
         }
 
-        return $this->runHugoBuild();
+        return $this->runHugoBuild(true, 'manual');
     }
 
     /**
@@ -1571,15 +1641,21 @@ final class Connector
                     $this->logger->warning('Fällige Austausche nicht angewendet: ' . $e->getMessage());
                 }
 
-                if (!$force && $applied === []) {
+                // Eine übernommene Lieferung der Shop-Anbindung zählt wie eine
+                // fällige Freigabe: sie will gebaut werden.
+                $shopPending = $this->hugo !== null && ShopSync::buildPending($this->shopVarDir());
+
+                if (!$force && $applied === [] && !$shopPending) {
                     $this->logger->info('Cron-Build übersprungen — keine fälligen Freigaben.');
 
                     return ['skipped' => true, 'applied' => 0, 'committedPending' => $committedPending];
                 }
 
                 // Freigaben sind bereits angewendet — nicht erneut anwenden.
-                $result = $this->runHugoBuild(false);
+                $result = $this->runHugoBuild(false, 'cron');
                 $result['applied'] = count($applied);
+                // Anlass des Laufs für die Ausgabe des Cron-Skripts
+                $result['shopDelivery'] = $shopPending;
                 $result['committedPending'] = $committedPending;
 
                 // Optionaler Commit nach der Veröffentlichung: nur wenn wirklich
@@ -1838,9 +1914,15 @@ final class Connector
      * Aufrufer, die das bereits selbst erledigt haben ({@see buildSite()}, das
      * daraus erst entscheidet, ob überhaupt gebaut wird).
      *
+     * Läufe derselben Webseite laufen nacheinander, nie gleichzeitig: Knopf,
+     * Cron und Shop-Anbindung teilen sich eine Sperre ({@see BuildLock}). Wer
+     * später kommt, wartet und baut dann den neuesten Stand.
+     *
+     * $trigger (manual, cron, shop) steht im gespeicherten Stand des Laufs.
+     *
      * @return array{success: bool, exitCode: int, output: string, seconds: float}
      */
-    private function runHugoBuild(bool $applyDrafts = true): array
+    private function runHugoBuild(bool $applyDrafts = true, string $trigger = 'manual'): array
     {
         if ($this->hugo === null) {
             throw new ApiException('ECONFIG', 500, 'HUGO-NOT-CONFIGURED');
@@ -1884,26 +1966,287 @@ final class Connector
             . (!empty($this->hugo['minify']) ? ' --minify' : '')
             . ' 2>&1';
 
-        $start = hrtime(true);
-        $lines = [];
-        $exitCode = 1;
-        exec($cmd, $lines, $exitCode);
-        $seconds = round((hrtime(true) - $start) / 1e9, 2);
+        $lock = $this->buildLock();
+        $lock->acquire();
+        try {
+            $lock->recordStart($trigger);
+            // Dieser Lauf baut, was bis jetzt übernommen wurde. Kommt während
+            // des Laufs eine neue Lieferung, setzt sie die Markierung erneut.
+            $shopVarDir = $this->shopVarDir();
+            $shopPending = ShopSync::buildPending($shopVarDir);
+            ShopSync::clearBuildPending($shopVarDir);
 
-        // Ausgabe begrenzen (Logs können lang werden): die letzten 200 Zeilen.
-        $output = implode("\n", array_slice($lines, -200));
-        if ($exitCode === 0) {
-            $this->logger->info("Hugo-Lauf erfolgreich ({$seconds}s): {$source} -> {$dest}");
-        } else {
-            $this->logger->warning("Hugo-Lauf fehlgeschlagen (Code {$exitCode}): {$output}");
+            $start = hrtime(true);
+            $lines = [];
+            $exitCode = 1;
+            exec($cmd, $lines, $exitCode);
+            $seconds = round((hrtime(true) - $start) / 1e9, 2);
+
+            // Ausgabe begrenzen (Logs können lang werden): die letzten 200 Zeilen.
+            $output = implode("\n", array_slice($lines, -200));
+            if ($exitCode === 0) {
+                $this->logger->info("Hugo-Lauf erfolgreich ({$seconds}s, {$trigger}): {$source} -> {$dest}");
+            } else {
+                $this->logger->warning("Hugo-Lauf fehlgeschlagen (Code {$exitCode}, {$trigger}): {$output}");
+            }
+
+            $result = [
+                'success' => $exitCode === 0,
+                'exitCode' => $exitCode,
+                'output' => $output,
+                'seconds' => $seconds,
+            ];
+            $lock->recordFinish($result);
+            // Gescheitert: die Lieferung bleibt vorgemerkt, damit der nächste
+            // Lauf sie baut, sobald der Fehler behoben ist
+            if ($shopPending && $exitCode !== 0) {
+                ShopSync::markBuildPending($shopVarDir);
+            }
+
+            return $result;
+        } finally {
+            $lock->release();
+        }
+    }
+
+    /**
+     * Sperre und gespeicherter Stand der Hugo-Läufe dieser Webseite, unter
+     * var/build/<sha1(Quelle)> — dieselbe Ablage je Webseite wie Vorschau und
+     * Cron.
+     */
+    private function buildLock(): BuildLock
+    {
+        return new BuildLock(__DIR__ . '/../var/build/' . sha1((string) ($this->hugo['source'] ?? '')));
+    }
+
+    // --- Shop-Anbindung (OpensourceERP) --------------------------------------
+
+    /**
+     * Verlangt den Schlüssel der Shop-Anbindung für DIESE Webseite.
+     *
+     * Die Webseite steht schon fest, bevor diese Prüfung läuft — HugoCMS hat
+     * sie aus Host und Endpunkt bestimmt und ihre Mount-Datei geladen. Ein
+     * Schlüssel gilt deshalb nur für die Webseite, zu der er gehört.
+     *
+     * Keine Sitzung, kein CSRF-Token: Es ruft kein Browser, sondern ein Server.
+     * Unverschlüsselt nimmt der Zugang nichts an, außer über die
+     * Loopback-Adresse ({@see ShopKey::transportSecure()}).
+     */
+    private function requireShopKey(): void
+    {
+        if (!ShopKey::transportSecure($_SERVER)) {
+            throw new ApiException('EINSECURE', 403, 'SHOP-HTTPS-REQUIRED');
+        }
+        if ($this->shop['keyHash'] === null) {
+            throw ApiException::unauthorized('SHOP-KEY-NOT-SET');
+        }
+        if (!ShopKey::verify($this->shop['keyHash'], ShopKey::fromRequest($_SERVER))) {
+            // Nur protokollieren, woher — der vorgelegte Wert gehört nicht ins Log
+            $this->logger->warning('Shop-Anbindung: ungültiger Schlüssel von ' . ($_SERVER['REMOTE_ADDR'] ?? '?'));
+            throw ApiException::unauthorized('SHOP-KEY-INVALID');
+        }
+    }
+
+    /**
+     * Baut die Webseite auf Anstoß von OpensourceERP.
+     *
+     * Läuft wie der Knopf „Veröffentlichen“ in dieser Anfrage und antwortet
+     * mit dem Ergebnis — ein Stateless-Backend ohne Hintergrundprozesse.
+     * OpensourceERP ruft den Befehl aus seinem eigenen Hintergrundlauf auf und
+     * wartet dort; der Browser wartet nirgends.
+     *
+     * Der Pausenschalter für den Cron-Bau gilt auch hier: Wer das Bauen
+     * aussetzt, will auch keine Läufe von außen.
+     */
+    private function cmdShopBuild(): array
+    {
+        $this->requireShopKey();
+        $this->requireMethod('POST', false);
+        if (!empty($this->cronPause['pauseBuild'])) {
+            return ['paused' => true];
         }
 
+        // Ein Vollbau großer Shops dauert; dieselbe Grenze wie bei den
+        // übrigen langen Web-Aufträgen.
+        @set_time_limit(600);
+
+        return ['paused' => false] + $this->runHugoBuild(true, 'shop');
+    }
+
+    /**
+     * Baustand dieser Webseite für OpensourceERP: läuft gerade ein Hugo-Lauf,
+     * wie ging der letzte aus. Dient zugleich als Verbindungstest.
+     */
+    private function cmdShopBuildStatus(): array
+    {
+        $this->requireShopKey();
+        $buildable = $this->hugo !== null && $this->hugoBin !== null;
+
         return [
-            'success' => $exitCode === 0,
-            'exitCode' => $exitCode,
-            'output' => $output,
-            'seconds' => $seconds,
+            'buildable' => $buildable,
+            'paused' => !empty($this->cronPause['pauseBuild']),
+            'running' => $buildable && $this->buildLock()->isRunning(),
+            'buildPending' => $this->hugo !== null && ShopSync::buildPending($this->shopVarDir()),
+            'last' => $buildable ? $this->buildLock()->last() : null,
+            // Was die Anbindung beschreiben darf — OpensourceERP prüft damit
+            // vorab, statt erst am Abgleich zu scheitern
+            'areas' => $this->shop['areas'],
+            'accept' => ShopSync::ACCEPT,
+            'images' => $this->shop['images'],
+            'thumbnails' => $this->shop['thumbnails'],
         ];
+    }
+
+    /**
+     * Erzeugt einen neuen Schlüssel für die Shop-Anbindung dieser Webseite.
+     *
+     * Die Antwort trägt den Schlüssel — das einzige Mal überhaupt: gespeichert
+     * wird nur sein Hash. Ein vorhandener Schlüssel wird dabei ersetzt und gilt
+     * sofort nicht mehr.
+     */
+    private function cmdShopKeyCreate(): array
+    {
+        $this->requireShopKeyAdmin();
+
+        $key = ShopKey::generate();
+        $created = gmdate('c');
+        // updateSections ersetzt die Sektion als Ganzes — von Hand gepflegte
+        // Einträge wie areas deshalb übernehmen
+        Config::updateSections($this->mountsPath, ['shop' => [
+            'key_hash' => ShopKey::hash($key),
+            'key_hint' => ShopKey::hint($key),
+            'key_created' => $created,
+        ] + $this->shopSectionRest()]);
+        $this->shop = MountConfig::load((string) $this->mountsPath)['shop'];
+        $this->logger->info('Shop-Anbindung: neuer Schlüssel erzeugt (…' . ShopKey::hint($key) . ')');
+
+        return ['key' => $key, 'hint' => ShopKey::hint($key), 'created' => $created];
+    }
+
+    /** Entfernt den Schlüssel der Shop-Anbindung; OpensourceERP ist danach ausgesperrt. */
+    private function cmdShopKeyDelete(): array
+    {
+        $this->requireShopKeyAdmin();
+
+        $rest = $this->shopSectionRest();
+        Config::updateSections($this->mountsPath, ['shop' => $rest === [] ? null : $rest]);
+        $this->shop = MountConfig::load((string) $this->mountsPath)['shop'];
+        $this->logger->info('Shop-Anbindung: Schlüssel entfernt');
+
+        return ['removed' => true];
+    }
+
+    /**
+     * Schlüssel verwalten dürfen nur Administratoren ({@see requireConfigAdmin})
+     * — anders als die übrigen Projekteinstellungen, die auch Redakteure
+     * ändern: Ein Schlüssel ist ein Zugang, keine redaktionelle Einstellung.
+     */
+    private function requireShopKeyAdmin(): void
+    {
+        $this->requireConfigAdmin();
+        $this->requireMethod('POST');
+        if ($this->mountsPath === null) {
+            throw new ApiException('ECONFIG', 409, 'PROJECT-CONFIG-UNAVAILABLE');
+        }
+    }
+
+    /**
+     * Einträge der [shop]-Sektion außer dem Schlüssel — was ein Administrator
+     * von Hand eingetragen hat (areas) und beim Schlüsselwechsel bleiben soll.
+     *
+     * @return array<string, mixed>
+     */
+    private function shopSectionRest(): array
+    {
+        $section = Config::raw((string) $this->mountsPath)['shop'] ?? [];
+        if (!is_array($section)) {
+            return [];
+        }
+        unset($section['key_hash'], $section['key_hint'], $section['key_created']);
+
+        return $section;
+    }
+
+    /** Laufzeitdaten der Shop-Anbindung dieser Webseite, unter var/shop/<sha1(Quelle)>. */
+    private function shopVarDir(): string
+    {
+        return __DIR__ . '/../var/shop/' . sha1((string) ($this->hugo['source'] ?? ''));
+    }
+
+    private function shopSync(): ShopSync
+    {
+        if ($this->hugo === null) {
+            throw new ApiException('ECONFIG', 500, 'HUGO-NOT-CONFIGURED');
+        }
+
+        return new ShopSync((string) $this->hugo['source'], $this->shopVarDir(), $this->shop['areas']);
+    }
+
+    /**
+     * Abgleich einer Lieferung aus OpensourceERP: nimmt das Verzeichnis der
+     * Dateien (Pfad und Prüfsumme) und nennt, was fehlt oder abweicht.
+     */
+    private function cmdShopManifest(array $request): array
+    {
+        $this->requireShopKey();
+        $this->requireMethod('POST', false);
+
+        return $this->shopSync()->manifest($request['files'] ?? null);
+    }
+
+    /** Übertragung einer Portion Dateien in die Bereitstellung — noch nicht in die Webseite. */
+    private function cmdShopUpload(array $request): array
+    {
+        $this->requireShopKey();
+        $this->requireMethod('POST', false);
+
+        return $this->shopSync()->upload((string) ($request['syncId'] ?? ''), $request['files'] ?? null);
+    }
+
+    /**
+     * Vorschaubilder für die genannten Produktbilder erzeugen — in Abschnitten
+     * von höchstens 20 Sekunden; die Antwort nennt mit `next`, wo der nächste
+     * Aufruf weitermacht. Entsteht ein neues Vorschaubild, wird gebaut: es liegt
+     * unter static/ und kommt erst mit dem Bau nach public/.
+     */
+    private function cmdShopThumbnails(array $request): array
+    {
+        $this->requireShopKey();
+        $this->requireMethod('POST', false);
+        if ($this->hugo === null) {
+            throw new ApiException('ECONFIG', 500, 'HUGO-NOT-CONFIGURED');
+        }
+        @set_time_limit(120);
+
+        $result = (new ShopThumbnails((string) $this->hugo['source'], $this->shop['images'], $this->shop['thumbnails']))
+            ->run($request['names'] ?? null, (int) ($request['size'] ?? 0), (int) ($request['offset'] ?? 0));
+        if ($result['created'] > 0) {
+            ShopSync::markBuildPending($this->shopVarDir());
+        }
+
+        return $result + ['buildPending' => ShopSync::buildPending($this->shopVarDir())];
+    }
+
+    /**
+     * Übernahme: schreibt die Lieferung in die Webseite, löscht nicht mehr
+     * Geliefertes und setzt die Bau-Markierung. Gebaut wird danach — vom Cron
+     * oder auf Anstoß mit shopbuild.
+     */
+    private function cmdShopCommit(array $request): array
+    {
+        $this->requireShopKey();
+        $this->requireMethod('POST', false);
+        @set_time_limit(300);
+
+        $result = $this->shopSync()->commit((string) ($request['syncId'] ?? ''));
+        $this->logger->info(sprintf(
+            'Shop-Anbindung: Lieferung übernommen (%d geschrieben, %d gelöscht, %d unverändert)',
+            $result['written'],
+            $result['deleted'],
+            $result['unchanged'],
+        ));
+
+        return $result;
     }
 
     /**
@@ -3919,6 +4262,9 @@ final class Connector
     /** Mindestlänge für ein neu gesetztes Passwort (wie im Erst-Setup). */
     private const MIN_PASSWORD_LENGTH = 8;
 
+    /** Bildendungen, die Hochladen und Bild-Editor verarbeiten (Vorschläge der Benutzerverwaltung). */
+    private const IMAGE_TYPES = ['png', 'jpg', 'jpeg', 'gif', 'webp'];
+
     /**
      * Grenzen für eine über den Konto-Dialog gesetzte Sitzungsdauer (Stunden):
      * eine Viertelstunde bis 30 Tage. Beim LESEN gelten sie nicht — ein von Hand
@@ -4001,6 +4347,17 @@ final class Connector
             // SEO-Bericht: einzelne ausgeschlossene Dateien (eine je Zeile).
             'seoExcludeFiles' => implode("\n", Config::normalizeExcludeFiles(
                 (string) ($raw['seo_report']['exclude_files'] ?? ''),
+            )),
+            // Texteditor: zusätzlich freigegebene Endungen (kommagetrennt) und
+            // die eingebauten, damit der Dialog sie im Hinweis nennen kann.
+            'editorExtraEditable' => implode(', ', Config::normalizeExtensions(
+                (string) ($raw['editor']['extra_editable'] ?? ''),
+            )),
+            'editorDefaultEditable' => FileService::DEFAULT_EDITABLE,
+            // Verzeichnisauswahl: freigegebene Einstiegspunkte (eine je Zeile);
+            // leer = abgeleitet.
+            'systemBrowseRoots' => implode("\n", Config::normalizeBrowseRoots(
+                (string) ($raw['system']['browse_roots'] ?? ''),
             )),
         ];
     }
@@ -4171,6 +4528,19 @@ final class Connector
             // Ohne zusätzliche Präfixe/Dateien keine [seo_report]-Sektion.
             'seo_report' => $seoSection,
         ];
+        // [editor] nur anfassen, wenn das Formular das Feld mitschickt — ein
+        // älterer Client soll eine von Hand gepflegte Freigabe nicht löschen.
+        // Ungültige Einträge verwirft die Normalisierung; ohne Eintrag entfällt
+        // die Sektion.
+        // [system] wie [editor]: nur anfassen, wenn das Formular das Feld schickt.
+        if (array_key_exists('systemBrowseRoots', $request)) {
+            $roots = Config::normalizeBrowseRoots((string) $request['systemBrowseRoots']);
+            $sections['system'] = $roots === [] ? null : ['browse_roots' => implode(', ', $roots)];
+        }
+        if (array_key_exists('editorExtraEditable', $request)) {
+            $extra = Config::normalizeExtensions((string) $request['editorExtraEditable']);
+            $sections['editor'] = $extra === [] ? null : ['extra_editable' => implode(', ', $extra)];
+        }
         // [auth] NUR bei einem Treiberwechsel mitgeben. Den Schlüssel immer zu
         // setzen wäre gefährlich: updateSections deutet null als „Sektion
         // entfernen" — die Anmeldedaten wären damit weg.
@@ -4300,6 +4670,16 @@ final class Connector
             'tagLabel' => (string) $this->gitAuto['tagLabel'],
             // Ist die Quelle ein Git-Repository? Für den Hinweis im Formular.
             'gitRepo' => $this->sourceIsGitRepo(),
+            // Shop-Anbindung: ob ein Schlüssel hinterlegt ist. Der Schlüssel
+            // selbst ist nirgends gespeichert und kommt nie zurück.
+            'shopKey' => [
+                'set' => $this->shop['keyHash'] !== null,
+                'hint' => $this->shop['keyHint'],
+                'created' => $this->shop['keyCreated'],
+                // Was OpensourceERP beschreiben darf — nur zur Anzeige, gepflegt
+                // in der Mount-Datei ([shop] areas)
+                'areas' => $this->shop['areas'],
+            ],
         ];
     }
 
@@ -4516,7 +4896,7 @@ final class Connector
      * Einzelbenutzer in der hugocms.ini, beim Mehrbenutzer in der Datei des
      * jeweiligen Kontos. Einmal je Request ermittelt.
      *
-     * @return array{sessionLifetime: int, contentWidth: int, toolbarCollapsed: bool, updateLastmod: ?bool}
+     * @return array{sessionLifetime: int, contentWidth: int, toolbarCollapsed: bool, updateLastmod: ?bool, showHidden: bool}
      */
     private function userPrefs(): array
     {
@@ -4541,6 +4921,8 @@ final class Connector
      *   sessionLifetime  Sitzungsdauer in STUNDEN (session_lifetime)
      *   updateLastmod    lastmod beim Speichern setzen (update_lastmod);
      *                    null entfernt den Schlüssel = im Editor nachfragen
+     *   showHidden       versteckte Dateien zeigen (show_hidden); true nur mit
+     *                    dem Recht AuthInterface::HIDDEN_FILES
      *
      * Jedes Feld ist einzeln optional; nur mitgegebene Felder werden
      * geschrieben, die übrigen [user]-Werte bleiben unberührt. Die ersten
@@ -4600,6 +4982,18 @@ final class Connector
             $changes['update_lastmod'] = $lastmod === null ? null : ($lastmod ? 'true' : 'false');
         }
 
+        if (array_key_exists('showHidden', $request)) {
+            $showHidden = $request['showHidden'];
+            if (!is_bool($showHidden)) {
+                throw ApiException::badRequest('PARAM-INVALID', ['showHidden']);
+            }
+            // Einschalten nur mit Freigabe; ausschalten darf jedes Konto.
+            if ($showHidden && !$this->auth->can(AuthInterface::HIDDEN_FILES)) {
+                throw ApiException::denied('HIDDEN-FILES-NOT-ALLOWED');
+            }
+            $changes['show_hidden'] = $showHidden ? 'true' : 'false';
+        }
+
         if ($changes === []) {
             throw ApiException::badRequest('PARAM-MISSING', ['contentWidth']);
         }
@@ -4633,7 +5027,186 @@ final class Connector
             // Dreiwertig: null = beim Speichern nach lastmod-Aktualisierung
             // fragen; true/false = ohne Nachfrage anwenden.
             'updateLastmod' => $prefs['updateLastmod'],
+            // Versteckte Dateien: wirksamer Zustand und ob das Konto ihn
+            // überhaupt schalten darf (sonst zeigt die Oberfläche den Schalter
+            // deaktiviert).
+            'showHidden' => $this->showHidden(),
+            'hiddenAllowed' => $this->auth->isAuthenticated() && $this->auth->can(AuthInterface::HIDDEN_FILES),
         ];
+    }
+
+    // ---- Orte verwalten (Mounts dieser Webseite, nur Administratoren) --------
+    //
+    // Geschrieben wird in die Mount-Datei dieser Webseite (mounts/<hash>.ini
+    // bzw. der Rückfall mounts.ini) über Config::updateSections — die übrigen
+    // Sektionen bleiben wörtlich erhalten. Umbenennen ändert nur `label`: Die
+    // Sektions-ID steckt in den Datei-IDs des Clients und bleibt deshalb fest.
+
+    /** Maximale Länge eines Ortsnamens (label). */
+    private const MOUNT_LABEL_MAX = 80;
+
+    /** Mount-Datei zum Schreiben, nur für Administratoren. */
+    private function requireMountAdmin(): string
+    {
+        $this->requireConfigAdmin();
+        if ($this->mountsPath === null) {
+            throw new ApiException('ECONFIG', 409, 'MOUNTS-NOT-EDITABLE');
+        }
+
+        return $this->mountsPath;
+    }
+
+    /**
+     * mountadmin — die Orte dieser Webseite mit Serverpfad (nur für
+     * Administratoren; der Pfad verlässt das Backend sonst nie).
+     */
+    private function cmdMountAdmin(): array
+    {
+        $path = $this->requireMountAdmin();
+
+        return $this->mountAdminState($path);
+    }
+
+    private function mountAdminState(string $path): array
+    {
+        $mounts = [];
+        foreach (MountConfig::load($path)['mounts'] as $spec) {
+            $real = realpath($spec['path']);
+            $mounts[] = [
+                'name' => $spec['name'],
+                'label' => $spec['options']['label'] ?? $spec['name'],
+                'path' => $real !== false ? $real : $spec['path'],
+                'missing' => $real === false || !is_dir($real),
+                'readonly' => !empty($spec['options']['readonly']),
+                'accept' => $spec['options']['accept'] ?? [],
+                'permissions' => $spec['options']['permissions'] ?? null,
+            ];
+        }
+
+        return [
+            'mounts' => $mounts,
+            // Rückfall-Datei: gilt für ALLE Webseiten ohne eigene Datei — der
+            // Dialog weist darauf hin.
+            'shared' => basename($path) === 'mounts.ini',
+        ];
+    }
+
+    /** mountadd — neuen Ort anlegen: Name (label) und Verzeichnis. */
+    private function cmdMountAdd(array $request): array
+    {
+        $file = $this->requireMountAdmin();
+        $this->requireMethod('POST');
+
+        $label = $this->cleanMountLabel($request['label'] ?? '');
+        if (trim((string) ($request['path'] ?? '')) === '') {
+            throw ApiException::badRequest('PARAM-MISSING', ['path']);
+        }
+        // Nur Verzeichnisse unterhalb der Einstiegspunkte — wie im Dialog.
+        $dir = $this->directoryBrowser()->resolve((string) $request['path']);
+        if ($this->resolver->isProtected($dir)) {
+            throw ApiException::denied('MOUNT-PATH-PROTECTED', [$label]);
+        }
+
+        $existing = MountConfig::load($file)['mounts'];
+        foreach ($existing as $spec) {
+            if (realpath($spec['path']) === $dir) {
+                throw ApiException::badRequest('MOUNT-PATH-DUPLICATE', [$spec['options']['label'] ?? $spec['name']]);
+            }
+        }
+        $raw = Config::raw($file);
+        $name = MountConfig::newMountName($dir, array_map('strval', array_keys($raw)));
+
+        Config::updateSections($file, [$name => ['path' => $dir, 'label' => $label]]);
+        $this->logger->info('Ort angelegt: ' . $name . ' → ' . $dir);
+
+        return $this->mountAdminState($file);
+    }
+
+    /** mountrename — sichtbaren Namen (label) eines Orts ändern. */
+    private function cmdMountRename(array $request): array
+    {
+        $file = $this->requireMountAdmin();
+        $this->requireMethod('POST');
+
+        [$name, $section] = $this->mountSection($file, (string) ($request['name'] ?? ''));
+        $section['label'] = $this->cleanMountLabel($request['label'] ?? '');
+        Config::updateSections($file, [strtolower($name) => $section]);
+        $this->logger->info('Ort umbenannt: ' . $name . ' → ' . $section['label']);
+
+        return $this->mountAdminState($file);
+    }
+
+    /**
+     * mountdelete — Ort entfernen. Nur der Eintrag verschwindet; die Dateien
+     * im Verzeichnis bleiben unberührt. Der letzte Ort bleibt: Ohne Mount
+     * lehnt das Backend die Webseite ab (MOUNTS-NO-SECTION).
+     */
+    private function cmdMountDelete(array $request): array
+    {
+        $file = $this->requireMountAdmin();
+        $this->requireMethod('POST');
+
+        [$name] = $this->mountSection($file, (string) ($request['name'] ?? ''));
+        if (count(MountConfig::load($file)['mounts']) <= 1) {
+            throw new ApiException('ECONFLICT', 409, 'MOUNT-LAST');
+        }
+        Config::updateSections($file, [strtolower($name) => null]);
+        $this->logger->info('Ort entfernt: ' . $name);
+
+        return $this->mountAdminState($file);
+    }
+
+    /** browsedirs — Verzeichnisauswahl für neue Orte (nur Administratoren). */
+    private function cmdBrowseDirs(array $request): array
+    {
+        $this->requireMountAdmin();
+
+        return $this->directoryBrowser()->list((string) ($request['path'] ?? ''));
+    }
+
+    private function directoryBrowser(): DirectoryBrowser
+    {
+        // Ableitung ohne browse_roots: Hugo-Projekt und vorhandene Orte.
+        $hints = [];
+        if ($this->hugo !== null && isset($this->hugo['source'])) {
+            $hints[] = (string) $this->hugo['source'];
+        }
+        foreach ($this->resolver->all() as $mount) {
+            $hints[] = $mount->root();
+        }
+
+        return new DirectoryBrowser($this->system['browseRoots'], $hints, $this->resolver);
+    }
+
+    /**
+     * Rohe Sektion eines vorhandenen Orts (Schlüssel wörtlich, z. B. ein
+     * relativer path bleibt relativ) samt der Schreibweise ihres Namens.
+     *
+     * @return array{0: string, 1: array<string, string>}
+     */
+    private function mountSection(string $file, string $name): array
+    {
+        if ($name === '' || MountConfig::isReserved($name)) {
+            throw ApiException::badRequest('MOUNT-UNKNOWN', [$name]);
+        }
+        foreach (Config::raw($file) as $section => $values) {
+            if (is_array($values) && strtolower((string) $section) === strtolower($name)) {
+                return [(string) $section, array_map('strval', $values)];
+            }
+        }
+        throw ApiException::notFound('MOUNT-UNKNOWN', [$name]);
+    }
+
+    private function cleanMountLabel(mixed $label): string
+    {
+        $label = trim((string) $label);
+        if ($label === '' || mb_strlen($label) > self::MOUNT_LABEL_MAX
+            || preg_match('/["\x00-\x1F]/u', $label) === 1
+        ) {
+            throw ApiException::badRequest('MOUNT-LABEL-INVALID', [self::MOUNT_LABEL_MAX]);
+        }
+
+        return $label;
     }
 
     // ---- Kontenverwaltung (nur Mehrbenutzer, nur Rolle admin) --------------
@@ -4737,6 +5310,9 @@ final class Connector
             'users' => $admin->listUsers(),
             'sites' => $this->knownSites(),
             'roles' => [UserAdminInterface::ROLE_ADMIN, UserAdminInterface::ROLE_EDITOR],
+            // Vorschläge für die Dateityp-Einschränkung: alles, was der Editor
+            // öffnet, dazu die Bildformate (Hochladen, Bild-Editor).
+            'fileTypes' => array_values(array_unique([...$this->editableTypes, ...self::IMAGE_TYPES])),
         ];
     }
 
@@ -4755,6 +5331,8 @@ final class Connector
             $password,
             (string) ($request['role'] ?? UserAdminInterface::ROLE_EDITOR),
             $this->requestSites($request),
+            $this->requestFileTypes($request) ?? [],
+            $this->requestBool($request, 'hiddenAllowed') ?? false,
         );
         $this->logger->info('Benutzerkonto angelegt: ' . $username);
 
@@ -4776,6 +5354,8 @@ final class Connector
             array_key_exists('role', $request) ? (string) $request['role'] : null,
             array_key_exists('sites', $request) ? $this->requestSites($request) : null,
             $disabled,
+            $this->requestFileTypes($request),
+            $this->requestBool($request, 'hiddenAllowed'),
         );
         $this->logger->info('Benutzerkonto geändert: ' . $username);
 
@@ -4809,6 +5389,38 @@ final class Connector
         $this->logger->info('Benutzerkonto gelöscht: ' . $username);
 
         return ['ok' => true, 'users' => $admin->listUsers()];
+    }
+
+    /** Optionaler Wahrheitswert aus der Anfrage; null, wenn nicht genannt. */
+    private function requestBool(array $request, string $key): ?bool
+    {
+        if (!array_key_exists($key, $request)) {
+            return null;
+        }
+        if (!is_bool($request[$key])) {
+            throw ApiException::badRequest('PARAM-INVALID', [$key]);
+        }
+
+        return $request[$key];
+    }
+
+    /**
+     * Dateityp-Einschränkung aus der Anfrage: eine Liste von Endungen (leer =
+     * keine Einschränkung), oder null, wenn die Anfrage sie nicht nennt.
+     *
+     * @return ?list<string>
+     */
+    private function requestFileTypes(array $request): ?array
+    {
+        if (!array_key_exists('fileTypes', $request)) {
+            return null;
+        }
+        $types = $request['fileTypes'];
+        if (!is_array($types)) {
+            throw ApiException::badRequest('PARAM-INVALID', ['fileTypes']);
+        }
+
+        return array_values(array_map('strval', $types));
     }
 
     /**

@@ -22,6 +22,8 @@ use HugoCMS\FileManager\Exception\ApiException;
  *   toolbar_collapsed = false ; Werkzeugleiste eingeklappt starten (optional)
  *   update_lastmod = false ; lastmod beim Speichern setzen (optional; fehlt =
  *                          ; im Editor nachfragen)
+ *   show_hidden = false    ; versteckte Dateien zeigen (optional; wirkt nur
+ *                          ; mit dem Recht files.hidden)
  *
  *   [session]
  *   path = var/sessions
@@ -32,6 +34,13 @@ use HugoCMS\FileManager\Exception\ApiException;
  *
  *   [hugo]
  *   bin = ../bin/hugo/hugo   ; zentraler Pfad zum Hugo-Programm (optional)
+ *
+ *   [editor]
+ *   extra_editable = sh, conf ; weitere Endungen für den Texteditor (optional)
+ *
+ *   [system]
+ *   browse_roots = /srv/www, /home/web ; Einstiegspunkte der Verzeichnisauswahl
+ *                                      ; (optional; leer = abgeleitet)
  *
  * Die Sektion [hugo] enthält hier NUR das Programm (bin) — es gibt installa-
  * tionsweit nur eine Hugo-Binärdatei. Die je Webseite unterschiedlichen Pfade
@@ -58,11 +67,12 @@ final class Config
     /**
      * @return array{
      *   auth: array<string, mixed>,
-     *   user: array{sessionLifetime: int, contentWidth: int, toolbarCollapsed: bool, updateLastmod: ?bool},
+     *   user: array{sessionLifetime: int, contentWidth: int, toolbarCollapsed: bool, updateLastmod: ?bool, showHidden: bool},
      *   session: array{path: string},
      *   log: array{file: string, level: string, maxBytes: int, keep: int},
      *   hugoBin: ?string,
-     *   hugoClean: bool
+     *   hugoClean: bool,
+     *   editor: array{extraEditable: list<string>}
      * }
      */
     public static function load(string $configPath): array
@@ -133,7 +143,74 @@ final class Config
             'services' => self::servicesSection($raw['services'] ?? null),
             'mail' => self::mailSection($raw['mail'] ?? null),
             'seoReport' => self::seoReportSection($raw['seo_report'] ?? null),
+            'editor' => self::editorSection($raw['editor'] ?? null),
+            'system' => [
+                'browseRoots' => self::normalizeBrowseRoots((string) ($raw['system']['browse_roots'] ?? '')),
+            ],
         ];
+    }
+
+    /**
+     * Einstiegspunkte der Verzeichnisauswahl ([system] browse_roots):
+     * kommagetrennte ABSOLUTE Pfade. Relative oder leere Einträge werden
+     * verworfen, Doppelte entfernt. Ob ein Pfad existiert, prüft erst der
+     * {@see DirectoryBrowser} — ein gerade nicht eingehängtes Laufwerk soll die
+     * Einstellung nicht zerstören.
+     *
+     * @return list<string>
+     */
+    public static function normalizeBrowseRoots(string $raw): array
+    {
+        $out = [];
+        foreach (preg_split('/[,\r\n]+/', $raw) ?: [] as $entry) {
+            $path = trim((string) $entry);
+            if ($path === '' || $path[0] !== '/' || str_contains($path, '"')) {
+                continue;
+            }
+            $out[$path === '/' ? '/' : rtrim($path, '/')] = true;
+        }
+
+        return array_keys($out);
+    }
+
+    /**
+     * Texteditor ([editor]-Sektion, optional). extra_editable ERGÄNZT die fest
+     * eingebauten Editor-Endungen ({@see FileService::DEFAULT_EDITABLE}) um
+     * weitere, kommagetrennt und ohne Punkt (z. B. "sh, conf"). Ergänzen statt
+     * Ersetzen: Ein Tippfehler in der Liste soll nicht Markdown & Co. aussperren.
+     * Die accept-Liste des Mounts gilt beim Speichern weiterhin zusätzlich.
+     *
+     * @return array{extraEditable: list<string>}
+     */
+    private static function editorSection(mixed $section): array
+    {
+        $section = is_array($section) ? $section : [];
+
+        return [
+            'extraEditable' => self::normalizeExtensions((string) ($section['extra_editable'] ?? '')),
+        ];
+    }
+
+    /**
+     * Normalisiert eine kommagetrennte Endungsliste: Kleinschreibung, führende
+     * Punkte entfernt, nur Buchstaben und Ziffern, entdoppelt. Ungültige
+     * Einträge (leer, mit Sonderzeichen) werden verworfen. Gemeinsam genutzt von
+     * [editor] extra_editable und der Dateityp-Liste je Benutzerkonto
+     * ({@see Auth\UserStore}).
+     *
+     * @return list<string>
+     */
+    public static function normalizeExtensions(string $raw): array
+    {
+        $out = [];
+        foreach (preg_split('/[,\s]+/', $raw) ?: [] as $entry) {
+            $ext = strtolower(ltrim(trim((string) $entry), '.'));
+            if ($ext !== '' && preg_match('/^[a-z0-9]+$/', $ext) === 1) {
+                $out[$ext] = true;
+            }
+        }
+
+        return array_keys($out);
     }
 
     /**
@@ -285,9 +362,9 @@ final class Config
      * angelegtes Konto (und jedes beim Umstieg übernommene) die installations-
      * weiten Vorgaben.
      *
-     * @param ?array{sessionLifetime: int, contentWidth: int, toolbarCollapsed: bool, updateLastmod: ?bool} $defaults
+     * @param ?array{sessionLifetime: int, contentWidth: int, toolbarCollapsed: bool, updateLastmod: ?bool, showHidden: bool} $defaults
      *
-     * @return array{sessionLifetime: int, contentWidth: int, toolbarCollapsed: bool, updateLastmod: ?bool}  sessionLifetime in Sekunden
+     * @return array{sessionLifetime: int, contentWidth: int, toolbarCollapsed: bool, updateLastmod: ?bool, showHidden: bool}  sessionLifetime in Sekunden
      */
     public static function userSection(mixed $section, ?array $defaults = null): array
     {
@@ -313,11 +390,18 @@ final class Config
             ? filter_var($section['update_lastmod'], FILTER_VALIDATE_BOOLEAN)
             : ($defaults['updateLastmod'] ?? null);
 
+        // Versteckte Dateien im Dateimanager zeigen — nur der Wunsch; ob das
+        // Konto es darf, entscheidet der Auth-Treiber (AuthInterface::HIDDEN_FILES).
+        $showHidden = isset($section['show_hidden'])
+            ? filter_var($section['show_hidden'], FILTER_VALIDATE_BOOLEAN)
+            : ($defaults['showHidden'] ?? false);
+
         return [
             'sessionLifetime' => $seconds,
             'contentWidth' => $width,
             'toolbarCollapsed' => $toolbarCollapsed,
             'updateLastmod' => $updateLastmod,
+            'showHidden' => $showHidden,
         ];
     }
 
@@ -476,10 +560,15 @@ final class Config
         $existing = is_file($configPath) ? (string) @file_get_contents($configPath) : '';
 
         // Sektionsreihenfolge: vorhandene zuerst (Position bleibt), neue ans Ende.
+        // $original merkt die Schreibweise der Kopfzeile: Mount-IDs sind
+        // Sektionsnamen, eine geänderte Sektion [Inhalte] soll nicht als
+        // [inhalte] zurückkommen (sonst änderte sich ihre ID).
         $order = [];
+        $original = [];
         foreach (preg_split('/\r\n|\r|\n/', $existing) ?: [] as $line) {
             if (preg_match('/^\s*\[(.+?)\]\s*$/', $line, $m) === 1) {
                 $order[] = strtolower(trim($m[1]));
+                $original[strtolower(trim($m[1]))] ??= trim($m[1]);
             }
         }
         foreach (array_keys($changes) as $name) {
@@ -494,7 +583,7 @@ final class Config
                 if ($changes[$name] === null) {
                     continue; // Sektion entfernen
                 }
-                $blocks[] = self::serializeSection($name, $changes[$name]);
+                $blocks[] = self::serializeSection($original[$name] ?? $name, $changes[$name]);
             } else {
                 $block = self::extractSection($existing, $name);
                 if ($block !== null) {

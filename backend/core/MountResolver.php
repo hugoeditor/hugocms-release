@@ -13,11 +13,30 @@ use HugoCMS\FileManager\Exception\ApiException;
  *
  * ID-Format: base64url("<mount>:<relativer/pfad>"). Die Wurzel eines
  * Mounts ist "<mount>:".
+ *
+ * Das eigene backend/ (hugocms.ini, Benutzerkonten, Mount-Konfigurationen,
+ * PHP-Code) ist für Mounts tabu: Ein Mount darf es weder enthalten noch darin
+ * liegen. Sonst könnte ein Redakteur mit Lösch- und Hochladerecht die
+ * Konfiguration austauschen und sich so z. B. Administratorrechte oder weitere
+ * Editor-Endungen verschaffen.
  */
 final class MountResolver
 {
     /** @var array<string, Mount> */
     private array $mounts = [];
+
+    /** Geschütztes Verzeichnis (realpath) oder null, falls nicht auflösbar. */
+    private readonly ?string $protectedDir;
+
+    /**
+     * @param ?string $protectedDir Verzeichnis, das kein Mount berühren darf.
+     *                              Standard: das backend/ dieser Installation.
+     */
+    public function __construct(?string $protectedDir = null)
+    {
+        $real = realpath($protectedDir ?? dirname(__DIR__));
+        $this->protectedDir = $real === false ? null : $real;
+    }
 
     public function add(Mount $mount): void
     {
@@ -28,7 +47,28 @@ final class MountResolver
         if (isset($this->mounts[$name])) {
             throw ApiException::badRequest('MOUNT-NAME-TAKEN', [$name]);
         }
+        // Nur den Mount-Namen melden, nie den Serverpfad.
+        if ($this->isProtected($mount->root())) {
+            throw ApiException::denied('MOUNT-PATH-PROTECTED', [$name]);
+        }
         $this->mounts[$name] = $mount;
+    }
+
+    /**
+     * Berührt dieses Verzeichnis (realpath) das geschützte backend/ — liegt es
+     * darin oder enthält es? Auch für die Orte-Verwaltung, die einen neuen Pfad
+     * vor dem Schreiben prüft.
+     */
+    public function isProtected(string $realPath): bool
+    {
+        return $this->protectedDir !== null
+            && (self::isWithin($this->protectedDir, $realPath) || self::isWithin($realPath, $this->protectedDir));
+    }
+
+    /** Liegt $path in $dir oder ist es $dir selbst? Beide als realpath. */
+    private static function isWithin(string $path, string $dir): bool
+    {
+        return $dir === '/' || $path === $dir || str_starts_with($path, $dir . '/');
     }
 
     /** @return array<string, Mount> */

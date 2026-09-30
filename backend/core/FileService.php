@@ -15,8 +15,10 @@ use HugoCMS\FileManager\Review\FrontMatter;
  * Stufe 2: makeDir, makeFile, rename, trash (Papierkorb), copy, move.
  * Stufe 3: storeUpload; Auslieferung (download/raw/thumb) macht der Connector.
  *
- * Versteckte Einträge (Punkt-Dateien, inkl. dem Papierkorb .trash) werden in
- * Listen ausgeblendet — wie der Standard von Nemo.
+ * Versteckte Einträge (Punkt-Dateien) werden in Listen ausgeblendet — wie der
+ * Standard von Nemo. Der Aufrufer kann sie einblenden (listDir $showHidden);
+ * der Papierkorb .trash und Zwischendateien (.hugofm…) bleiben auch dann
+ * verborgen, sie sind reine Verwaltungsdaten.
  */
 final class FileService
 {
@@ -29,14 +31,28 @@ final class FileService
     /** So viel vom Dateianfang genügt, um das Front Matter zu lesen. */
     private const FRONT_MATTER_BYTES = 8192;
 
+    /**
+     * Endungen, die der Texteditor von Haus aus öffnet. Weitere schaltet
+     * [editor] extra_editable in der hugocms.ini frei ({@see Config::load}).
+     */
+    public const DEFAULT_EDITABLE = ['html', 'htm', 'md', 'markdown', 'txt', 'css', 'js', 'json', 'xml', 'yaml', 'yml', 'svg', 'toml'];
+
     /** @var list<string> Endungen, die der Texteditor öffnen darf. */
     private array $editable;
 
+    /**
+     * @param ?\Closure(): ?list<string> $allowedTypes Dateityp-Einschränkung des
+     *        angemeldeten Benutzers ({@see Auth\FileTypeAwareInterface}); liefert
+     *        null für „keine Einschränkung“. Als Rückruf, weil erst der Request
+     *        klärt, wer angemeldet ist. Fehlt er (Shop-Anbindung, eigene
+     *        Instanzen), gibt es keine Einschränkung je Benutzer.
+     */
     public function __construct(
         private readonly MountResolver $resolver,
-        array $editable = ['html', 'htm', 'md', 'markdown', 'txt', 'css', 'js', 'json', 'xml', 'yaml', 'yml', 'svg', 'toml'],
+        array $editable = self::DEFAULT_EDITABLE,
         private readonly int $maxEditableBytes = 5_242_880, // 5 MiB
         private readonly int $maxUploadBytes = 52_428_800, // 50 MiB
+        private readonly ?\Closure $allowedTypes = null,
     ) {
         $this->editable = array_map('strtolower', $editable);
     }
@@ -46,7 +62,7 @@ final class FileService
      *
      * @return array<int, array>
      */
-    public function listDir(Mount $mount, string $rel, string $abs): array
+    public function listDir(Mount $mount, string $rel, string $abs, bool $showHidden = false): array
     {
         if (!is_dir($abs)) {
             throw ApiException::badRequest('NOT-A-DIRECTORY');
@@ -55,7 +71,8 @@ final class FileService
         $entries = [];
         foreach (scandir($abs) ?: [] as $name) {
             // Punkt-Einträge ausblenden (.,.., Punkt-Dateien und der .trash).
-            if ($name[0] === '.') {
+            // Mit $showHidden nur noch . und .. sowie die Verwaltungsdaten.
+            if ($name[0] === '.' && (!$showHidden || self::isInternalName($name))) {
                 continue;
             }
             $childRel = $rel === '' ? $name : $rel . '/' . $name;
@@ -87,6 +104,7 @@ final class FileService
         if (!$this->isEditable($name)) {
             throw ApiException::denied('FILETYPE-NOT-EDITABLE');
         }
+        $this->assertUserAllows($name);
         $size = filesize($abs);
         if ($size !== false && $size > $this->maxEditableBytes) {
             throw ApiException::denied('FILE-TOO-LARGE');
@@ -116,6 +134,7 @@ final class FileService
         if (!$this->isEditable($name)) {
             throw ApiException::denied('FILETYPE-NOT-SAVABLE');
         }
+        $this->assertUserAllows($name);
         if (!$mount->accepts($name)) {
             throw ApiException::denied('FILETYPE-NOT-ALLOWED-MOUNT');
         }
@@ -174,6 +193,7 @@ final class FileService
         if (!$mount->accepts($name)) {
             throw ApiException::denied('FILETYPE-NOT-ALLOWED-MOUNT');
         }
+        $this->assertUserAllows($name);
         $abs = $parentAbs . '/' . $name;
         if (file_exists($abs)) {
             throw ApiException::badRequest('ALREADY-EXISTS', [$name]);
@@ -201,6 +221,12 @@ final class FileService
         }
         if (is_file($abs) && !$mount->accepts($newName)) {
             throw ApiException::denied('FILETYPE-NOT-ALLOWED-MOUNT');
+        }
+        // Alter UND neuer Name: Sonst ließe sich eine gesperrte Datei über
+        // „.txt“ umbenennen, bearbeiten und zurückbenennen.
+        if (is_file($abs)) {
+            $this->assertUserAllows(basename($abs));
+            $this->assertUserAllows($newName);
         }
         if (!@rename($abs, $newAbs)) {
             throw new ApiException('EIO', 500, 'RENAME-FAILED');
@@ -239,6 +265,67 @@ final class FileService
             'deletedAt' => time(),
         ], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE));
         clearstatcache();
+    }
+
+    /**
+     * Legt ein Bild an oder ersetzt es — im Unterschied zu writeImage(), das nur
+     * vorhandene Bilder bearbeitet.
+     *
+     * Für Bilder, die HugoCMS selbst erzeugt (die Vorschaubilder der
+     * Shop-Anbindung). Dieselben Prüfungen: Endung laut Mount, Größe, Art aus
+     * den Rohdaten statt aus der Endung. Atomar über temporäre Datei.
+     *
+     * @return array Metadaten der gespeicherten Datei
+     */
+    public function putImage(Mount $mount, string $rel, string $abs, string $binary): array
+    {
+        $name = basename($abs);
+        self::assertValidName($name);
+        if (!$mount->accepts($name)) {
+            throw ApiException::denied('FILETYPE-NOT-ALLOWED-MOUNT');
+        }
+        if (strlen($binary) > $this->maxUploadBytes) {
+            throw ApiException::denied('CONTENT-TOO-LARGE');
+        }
+        if (!in_array($this->detectMimeString($binary), self::IMAGE_MIME, true)) {
+            throw ApiException::denied('FILETYPE-NOT-IMAGE');
+        }
+
+        $tmp = @tempnam(dirname($abs), '.hugofm');
+        if ($tmp === false) {
+            throw new ApiException('EIO', 500, 'TEMPFILE-FAILED');
+        }
+        if (@file_put_contents($tmp, $binary) === false || !@rename($tmp, $abs)) {
+            @unlink($tmp);
+            throw new ApiException('EIO', 500, 'FILE-SAVE-FAILED');
+        }
+        @chmod($abs, 0644);
+        clearstatcache(true, $abs);
+
+        return $this->entryInfo($mount, $rel, $abs);
+    }
+
+    /**
+     * Löscht eine Datei endgültig, ohne Papierkorb.
+     *
+     * Für Bereiche, deren Stand eine Quelle außerhalb von HugoCMS hält (die
+     * Shop-Anbindung): Was dort gelöscht wird, liefert die Quelle beim nächsten
+     * Mal wieder, falls es noch gilt. Ein Papierkorb füllte sich sonst mit
+     * jeder entfernten Produktseite. Nur Dateien, deren Endung der Mount
+     * annimmt; der Pfad muss über den Resolver aufgelöst sein.
+     */
+    public function remove(Mount $mount, string $abs): void
+    {
+        if (!is_file($abs)) {
+            return;
+        }
+        if (!$mount->accepts(basename($abs))) {
+            throw ApiException::denied('FILETYPE-NOT-ALLOWED-MOUNT');
+        }
+        if (!@unlink($abs)) {
+            throw new ApiException('EIO', 500, 'DELETE-FAILED');
+        }
+        clearstatcache(true, $abs);
     }
 
     /**
@@ -409,6 +496,7 @@ final class FileService
         if (!$mount->accepts($name)) {
             throw ApiException::denied('FILETYPE-NOT-ALLOWED-MOUNT');
         }
+        $this->assertUserAllows($name);
         if ((int) ($file['size'] ?? 0) > $this->maxUploadBytes) {
             throw ApiException::badRequest('UPLOAD-TOO-LARGE', [$name, self::humanBytes($this->maxUploadBytes)]);
         }
@@ -476,12 +564,14 @@ final class FileService
             if (!$mount->accepts($name)) {
                 throw ApiException::denied('FILETYPE-NOT-ALLOWED-MOUNT');
             }
+            $this->assertUserAllows($name);
             $destAbs = $this->uniqueTarget($parentAbs, $name, numbered: true);
             $destRel = self::childRel(self::parentRel($rel), basename($destAbs));
         } elseif ($mode === 'overwrite') {
             if (!$mount->accepts(basename($abs))) {
                 throw ApiException::denied('FILETYPE-NOT-ALLOWED-MOUNT');
             }
+            $this->assertUserAllows(basename($abs));
             $destAbs = $abs;
             $destRel = $rel;
         } else {
@@ -738,7 +828,9 @@ final class FileService
             'mtime' => (int) (filemtime($abs) ?: 0),
             'ctime' => (int) (filectime($abs) ?: 0),
             'mime' => $mime,
-            'editable' => !$isDir && $this->isEditable($name),
+            // Auch die Einschränkung je Benutzer: Die Dateiliste bietet dann
+            // gar nicht erst den Editor an, sondern meldet den Dateityp.
+            'editable' => !$isDir && $this->isEditable($name) && $this->userAllows($name),
             'image' => !$isDir && str_starts_with($mime, 'image/'),
         ];
     }
@@ -748,6 +840,34 @@ final class FileService
         $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
 
         return $ext !== '' && in_array($ext, $this->editable, true);
+    }
+
+    /** Nie anzuzeigen: ., .., der Papierkorb und Zwischendateien beim Speichern. */
+    private static function isInternalName(string $name): bool
+    {
+        return $name === '.' || $name === '..' || $name === '.trash' || str_starts_with($name, '.hugofm');
+    }
+
+    /**
+     * Darf der angemeldete Benutzer Dateien dieser Endung bearbeiten? Ohne
+     * Einschränkung (kein Rückruf, oder er liefert null) immer.
+     */
+    private function userAllows(string $filename): bool
+    {
+        $allowed = $this->allowedTypes !== null ? ($this->allowedTypes)() : null;
+        if ($allowed === null) {
+            return true;
+        }
+        $ext = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
+
+        return $ext !== '' && in_array($ext, $allowed, true);
+    }
+
+    private function assertUserAllows(string $filename): void
+    {
+        if (!$this->userAllows($filename)) {
+            throw ApiException::denied('FILETYPE-NOT-ALLOWED-USER');
+        }
     }
 
     private function detectMime(string $abs): string

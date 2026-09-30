@@ -27,7 +27,7 @@ use HugoCMS\FileManager\Exception\ApiException;
  * niemanden endgültig aus — der Administrator kommt herein und kann die Lizenz
  * eintragen —, aber die eigentliche Mehrbenutzer-Nutzung ruht.
  */
-final class MultiUser implements AuthInterface, UserAdminInterface, SiteAwareInterface
+final class MultiUser implements AuthInterface, UserAdminInterface, SiteAwareInterface, FileTypeAwareInterface
 {
     use SessionHandling;
 
@@ -193,8 +193,27 @@ final class MultiUser implements AuthInterface, UserAdminInterface, SiteAwareInt
         if (in_array($permission, self::ADMIN_PERMISSIONS, true)) {
             return $user['role'] === self::ROLE_ADMIN;
         }
+        // Versteckte Dateien: Administratoren immer, Redakteure nur mit
+        // ausdrücklicher Freigabe (allow_hidden in [account]).
+        if ($permission === self::HIDDEN_FILES) {
+            return $user['role'] === self::ROLE_ADMIN || $user['hiddenAllowed'];
+        }
 
         return true;
+    }
+
+    /**
+     * Dateityp-Einschränkung des angemeldeten Kontos. Administratoren sind
+     * ausgenommen — wie bei der Webseiten-Zuordnung.
+     */
+    public function allowedFileTypes(): ?array
+    {
+        $user = $this->currentAccount();
+        if ($user === null || $user['role'] === self::ROLE_ADMIN || $user['fileTypes'] === []) {
+            return null;
+        }
+
+        return $user['fileTypes'];
     }
 
     public function supportsPreferences(): bool
@@ -228,12 +247,14 @@ final class MultiUser implements AuthInterface, UserAdminInterface, SiteAwareInt
             'name' => $u['name'],
             'role' => $u['role'],
             'sites' => $u['sites'],
+            'fileTypes' => $u['fileTypes'],
+            'hiddenAllowed' => $u['hiddenAllowed'],
             'disabled' => $u['disabled'],
             'self' => UserStore::key($u['name']) === $self,
         ], $this->store->all());
     }
 
-    public function createUser(string $username, string $password, string $role, array $sites): void
+    public function createUser(string $username, string $password, string $role, array $sites, array $fileTypes = [], bool $allowHidden = false): void
     {
         $this->requireAdmin();
         $username = UserStore::normalizeName($username);
@@ -246,6 +267,8 @@ final class MultiUser implements AuthInterface, UserAdminInterface, SiteAwareInt
             $role,
             UserStore::normalizeSites($sites),
             false,
+            $fileTypes,
+            $allowHidden,
         );
     }
 
@@ -268,7 +291,7 @@ final class MultiUser implements AuthInterface, UserAdminInterface, SiteAwareInt
         ]);
     }
 
-    public function updateUser(string $username, ?string $role = null, ?array $sites = null, ?bool $disabled = null): void
+    public function updateUser(string $username, ?string $role = null, ?array $sites = null, ?bool $disabled = null, ?array $fileTypes = null, ?bool $allowHidden = null): void
     {
         $this->requireAdmin();
         $user = $this->store->load($username);
@@ -298,6 +321,13 @@ final class MultiUser implements AuthInterface, UserAdminInterface, SiteAwareInt
         }
         if ($disabled !== null) {
             $changes['disabled'] = $disabled ? 'true' : 'false';
+        }
+        if ($fileTypes !== null) {
+            // Leere Zeichenkette statt Entfernen: updateAccount führt nur zusammen.
+            $changes['file_types'] = implode(', ', UserStore::normalizeFileTypes($fileTypes));
+        }
+        if ($allowHidden !== null) {
+            $changes['allow_hidden'] = $allowHidden ? 'true' : 'false';
         }
         if ($changes === []) {
             return;

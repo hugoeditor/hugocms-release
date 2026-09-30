@@ -8,15 +8,17 @@ use HugoCMS\FileManager\Exception\ApiException;
 
 /**
  * Liest Mount-Definitionen aus einer INI-Konfigurationsdatei. Format: je
- * [Sektion] ein Mount, der Sektionsname ist die interne ID. Beispiel:
+ * [Sektion] ein Mount, der Sektionsname ist die interne ID (englisch wie alle
+ * INI-Schlüssel; ältere Dateien tragen noch [projekt] — bleibt gültig, der
+ * Name wird nirgends ausgewertet). Beispiel:
  *
- *   [inhalte]
- *   path = daten/inhalte
- *   label = Inhalte
+ *   [content]
+ *   path = /pfad/zum/hugo-projekt/content
+ *   label = Inhalt
  *   accept = md, markdown, html, png, jpg
  *
- *   [vorlagen]
- *   path = daten/vorlagen
+ *   [layouts]
+ *   path = /pfad/zum/hugo-projekt/layouts
  *   permissions = read, write
  *
  * Felder je Sektion:
@@ -89,6 +91,23 @@ use HugoCMS\FileManager\Exception\ApiException;
  *                          Sprachabhängiger Text und deshalb konfigurierbar —
  *                          im Dialog kommt er vom Client, beim Cron von hier.
  *                          Leer = nur die Nummer. Standard: siehe unten.
+ *
+ * Reservierte Sektion [shop] (kein Mount): Zugang der Shop-Anbindung
+ * (OpensourceERP). Ist ein Schlüssel hinterlegt, darf OpensourceERP die
+ * shop*-Befehle dieser Webseite ohne Sitzung aufrufen ({@see Shop\ShopKey}).
+ * Geschrieben wird die Sektion ausschließlich über die Projekteinstellungen
+ * (Befehle shopkeycreate/shopkeydelete), nie von Hand.
+ *   key_hash    Hash des Schlüssels (sha256:…). Der Schlüssel selbst steht nirgends.
+ *   key_hint    letzte vier Zeichen des Schlüssels, zum Wiedererkennen.
+ *   key_created Zeitpunkt der Erzeugung (ISO 8601).
+ *   areas       (optional, von Hand) Bereiche, die die Anbindung beschreiben
+ *               darf, kommagetrennt und relativ zur Hugo-Quelle: Verzeichnisse
+ *               mit / am Ende, sonst einzelne Dateien. Standard: der Aufbau,
+ *               den OpensourceERP erzeugt ({@see Shop\ShopSync::DEFAULT_AREAS}).
+ *   images      (optional, von Hand) Verzeichnis der Produktbilder, relativ zur
+ *               Hugo-Quelle. Standard: static/images/products.
+ *   thumbnails  (optional, von Hand) Verzeichnis, in das HugoCMS die
+ *               Vorschaubilder schreibt. Standard: static/images/thumbnails.
  */
 final class MountConfig
 {
@@ -101,6 +120,44 @@ final class MountConfig
     private const IMPROVE_SECTION = 'improve';
     private const CRON_SECTION = 'cron';
     private const GIT_SECTION = 'git';
+    private const SHOP_SECTION = 'shop';
+
+    /** Alle reservierten Sektionsnamen — kein Mount darf so heißen. */
+    private const RESERVED_SECTIONS = [
+        self::HUGO_SECTION, self::LICENSE_SECTION, self::PAGESPEED_SECTION,
+        self::LIVE_ANALYSIS_SECTION, self::SEO_REPORT_SECTION, self::IMPROVE_SECTION,
+        self::CRON_SECTION, self::GIT_SECTION, self::SHOP_SECTION,
+    ];
+
+    /** Ist $name eine reservierte Sektion (kein Mount)? */
+    public static function isReserved(string $name): bool
+    {
+        return in_array(strtolower($name), self::RESERVED_SECTIONS, true);
+    }
+
+    /**
+     * Sektions-ID für einen neuen Ort, aus dem Verzeichnisnamen abgeleitet
+     * (Hugo-Verzeichnisse heißen ohnehin englisch: content, static …). Nur
+     * [a-z0-9_-]; reservierte und vergebene Namen bekommen eine Nummer, ein
+     * unbrauchbarer Name wird „place“.
+     *
+     * @param list<string> $taken vorhandene Sektionsnamen
+     */
+    public static function newMountName(string $dir, array $taken): string
+    {
+        $base = strtolower(basename($dir));
+        $base = trim((string) preg_replace('/[^a-z0-9_-]+/', '-', $base), '-_');
+        if ($base === '') {
+            $base = 'place';
+        }
+        $taken = array_map('strtolower', $taken);
+        $name = $base;
+        for ($i = 2; self::isReserved($name) || in_array($name, $taken, true); $i++) {
+            $name = $base . '-' . $i;
+        }
+
+        return $name;
+    }
 
     /** Vorgeschlagene Commit-Nachricht, wenn keine konfiguriert ist. */
     public const string GIT_COMMIT_MESSAGE_DEFAULT = 'Automatische Veröffentlichung terminierter Freigaben';
@@ -149,9 +206,48 @@ final class MountConfig
      *   improve: array{auto: bool, windowStart: string, windowEnd: string, perDay: int, skipWeekends: bool},
      *   cron: array{pauseBuild: bool, pauseImprove: bool, pauseHealthcheck: bool},
      *   git: array{autoCommit: bool, commitMessage: string, commitMessagePending: string},
+     *   shop: array{keyHash: ?string, keyHint: ?string, keyCreated: ?string, areas: list<string>, images: string, thumbnails: string},
      *   warnings: list<array{key: string, params: list<mixed>}>
      * }
      */
+    /**
+     * Zerlegt [shop] areas. Ungültige Einträge (absolut, mit .. oder
+     * versteckten Bestandteilen) fallen weg.
+     *
+     * @return list<string>
+     */
+    private static function shopAreas(string $value): array
+    {
+        $areas = [];
+        foreach (explode(',', $value) as $area) {
+            $area = trim(str_replace('\\', '/', $area));
+            $directory = str_ends_with($area, '/');
+            $segments = array_values(array_filter(explode('/', $area), static fn ($s) => $s !== ''));
+            $valid = $segments !== [] && !str_starts_with($area, '/');
+            foreach ($segments as $segment) {
+                if ($segment === '..' || str_starts_with($segment, '.')) {
+                    $valid = false;
+                }
+            }
+            if ($valid) {
+                $areas[] = implode('/', $segments) . ($directory ? '/' : '');
+            }
+        }
+
+        return array_values(array_unique($areas));
+    }
+
+    /**
+     * Ein Verzeichnis der Shop-Anbindung, relativ zur Hugo-Quelle. Leer oder
+     * ungültig (absolut, mit .. oder Verstecktem) ergibt die Vorgabe.
+     */
+    private static function shopDirectory(mixed $value, string $default): string
+    {
+        $areas = self::shopAreas(trim((string) $value) . '/');
+
+        return count($areas) === 1 ? rtrim($areas[0], '/') : $default;
+    }
+
     public static function load(string $configPath): array
     {
         if (!is_file($configPath) || !is_readable($configPath)) {
@@ -182,6 +278,8 @@ final class MountConfig
             'changelogPaths' => [self::GIT_CHANGELOG_PATH_DEFAULT],
             'tagLabel' => self::GIT_TAG_LABEL_DEFAULT,
         ];
+        $shop = ['keyHash' => null, 'keyHint' => null, 'keyCreated' => null, 'areas' => Shop\ShopSync::DEFAULT_AREAS,
+                 'images' => Shop\ShopThumbnails::DEFAULT_IMAGES, 'thumbnails' => Shop\ShopThumbnails::DEFAULT_THUMBNAILS];
         $warnings = [];
 
         foreach ($raw as $name => $section) {
@@ -257,6 +355,32 @@ final class MountConfig
                 continue;
             }
 
+            // Zugang der Shop-Anbindung (optional, pro Webseite). Nur der Hash;
+            // ein leerer Wert zählt als „kein Schlüssel“.
+            if (strtolower((string) $name) === self::SHOP_SECTION) {
+                $hash = trim((string) ($section['key_hash'] ?? ''));
+                $hint = trim((string) ($section['key_hint'] ?? ''));
+                $created = trim((string) ($section['key_created'] ?? ''));
+                $areas = Shop\ShopSync::DEFAULT_AREAS;
+                if (trim((string) ($section['areas'] ?? '')) !== '') {
+                    $areas = self::shopAreas((string) $section['areas']);
+                    if ($areas === []) {
+                        // Nur Ungültiges eingetragen: lieber gar nichts
+                        // beschreibbar als stillschweigend die Vorgabe
+                        $warnings[] = ['key' => 'SHOP-AREAS-INVALID', 'params' => [$configPath]];
+                    }
+                }
+                $shop = [
+                    'keyHash' => $hash === '' ? null : $hash,
+                    'keyHint' => $hash === '' || $hint === '' ? null : $hint,
+                    'keyCreated' => $hash === '' || $created === '' ? null : $created,
+                    'areas' => $areas,
+                    'images' => self::shopDirectory($section['images'] ?? '', Shop\ShopThumbnails::DEFAULT_IMAGES),
+                    'thumbnails' => self::shopDirectory($section['thumbnails'] ?? '', Shop\ShopThumbnails::DEFAULT_THUMBNAILS),
+                ];
+                continue;
+            }
+
             // Automatischer Commit nach der Veröffentlichung (optional, pro Webseite)
             // sowie der Vorab-Commit offener Änderungen — beide am selben Schalter.
             if (strtolower((string) $name) === self::GIT_SECTION) {
@@ -328,6 +452,7 @@ final class MountConfig
             'improve' => $improve,
             'cron' => $cron,
             'git' => $git,
+            'shop' => $shop,
             'warnings' => $warnings,
         ];
     }
