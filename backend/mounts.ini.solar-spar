@@ -1,0 +1,100 @@
+; HugoCMS – Mount-Konfiguration (Rückfall)
+; ===========================================================================
+; Diese Datei ist der RÜCKFALL: Sie greift, wenn für die aufgerufene Webseite
+; keine eigene Datei mounts/<hash>.ini existiert (der Client erhält dann einen
+; Einrichtungs-Hinweis). Pro Webseite eine eigene mounts/<hash>.ini anlegen;
+; den Dateinamen liefert die 404-/Warnmeldung oder scripts/site-hash.sh.
+;
+; Format identisch für Rückfall und host-spezifische Dateien.
+;
+; Übergabe an den Connector:
+;
+;     $connector->mountsFromFile(__DIR__ . '/mounts.ini');
+;
+; Regeln:
+;   • Jede [Sektion] ist ein Mount. Der Sektionsname ist die interne ID
+;     (kurz, ohne Leer- und Sonderzeichen).
+;   • path        (Pflicht)  Verzeichnis des Mounts. Relative Pfade gelten
+;                            relativ zu DIESER Datei. Absolute Pfade empfohlen.
+;   • label       (optional) Anzeigename im Client. Standard: Sektionsname.
+;   • permissions (optional) Kommaliste. Werte: read, write, upload, delete,
+;                            mkdir, rename, copy, move. Fehlt sie: alle Rechte.
+;   • accept      (optional) Kommaliste erlaubter Endungen (ohne Punkt).
+;                            Leer oder fehlend: alle Endungen erlaubt.
+;   • readonly    (optional) true = nur Lesen (überschreibt permissions).
+;
+; Werte mit Sonderzeichen bei Bedarf in "doppelte Anführungszeichen" setzen.
+; ===========================================================================
+
+[content]
+path = "/media/worker/extra/solar-spar.de/content"
+label = "Inhalte"
+accept = "md, markdown, html, htm, png, jpg, jpeg, gif, webp, svg"
+
+[layouts]
+path = "/media/worker/extra/solar-spar.de/layouts"
+label = Vorlagen
+permissions = read, write
+
+[static]
+path = "/media/worker/extra/solar-spar.de/static"
+label = Medien
+
+[projekt]
+path = "/media/worker/extra/solar-spar.de/"
+label = Alle Dateien
+
+; Hugo-Aufruf für den Veröffentlichen-Knopf (Entwicklung). Das Hugo-Programm
+; (bin) steht zentral in der hugocms.ini, nicht hier.
+
+[hugo]
+source = "/media/worker/extra/solar-spar.de"
+destination = "/media/worker/extra/solar-spar.de/public"
+
+[license]
+key = "HUGOCMS-eyJsaWNlbnNlZSI6IkF1dG9wcm9maXMiLCJkb21haW4iOiIxMjcuMC4wLjEiLCJpc3N1ZWRfYXQiOiIyMDI2LTA2LTI2VDEzOjI4OjQ4WiJ9-daf9e001c74983873fcb12bbefcb576cdc8474486833ede16ac32d43339136e4817d7c27ad00ca6c8c814d04d333b8924293f6bc0b0a8eb874d2a48cdb5f2708"
+
+[pagespeed]
+url = "https://inter-data.de/"
+
+[seo_report]
+exclude_files = "google37dc500bdbcbca59.html"
+
+[live_analysis]
+url = "https://inter-data.de/"
+
+[improve]
+auto = "true"
+window_start = "07:00"
+window_end = "16:00"
+per_day = "3"
+skip_weekends = "true"
+
+[cron]
+pause_build = "false"
+pause_improve = "false"
+pause_healthcheck = "false"
+
+[git]
+auto_commit = "false"
+commit_message = "Automatische Veröffentlichung terminierter Freigaben"
+commit_message_pending = "Offene Änderungen vor dem Build gesichert"
+changelog = "true"
+changelog_path = "changelog.md"
+tag_label = "Ausgabe"
+
+[shop]
+enabled = "true"
+online_shop = "true"
+key_hash = "sha256:850f1672f5c0db54df8dd33bc48aeefe695d732a87aa0ed65231a6ec21d7368b"
+key_hint = "6fb6"
+key_created = "2026-11-12T13:12:00+00:00"
+signing_key = "fbL02UYClCRI68kJdEpFIs6K/VBBPvPYyTA26rjr1oE="
+content_dir = "content/shop/produkt"
+category_groups = "data/category_groups.json"
+images = "products_images"
+thumbnails = "thumbnails"
+downloads = "downloads"
+
+[images]
+upload_format = "avif"
