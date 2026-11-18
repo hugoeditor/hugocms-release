@@ -27,29 +27,29 @@
 ; ===========================================================================
 
 [content]
-path = "/media/worker/extra/solar-spar.de/content"
+path = "/home/work/Projekte/inter-data_ab_29_10_26/content"
 label = "Inhalte"
 accept = "md, markdown, html, htm, png, jpg, jpeg, gif, webp, svg"
 
 [layouts]
-path = "/media/worker/extra/solar-spar.de/layouts"
+path = "/home/work/Projekte/inter-data_ab_29_10_26/layouts"
 label = Vorlagen
 permissions = read, write
 
 [static]
-path = "/media/worker/extra/solar-spar.de/static"
+path = "/home/work/Projekte/inter-data_ab_29_10_26/static"
 label = Medien
 
 [projekt]
-path = "/media/worker/extra/solar-spar.de/"
+path = "/home/work/Projekte/inter-data_ab_29_10_26/"
 label = Alle Dateien
 
 ; Hugo-Aufruf für den Veröffentlichen-Knopf (Entwicklung). Das Hugo-Programm
 ; (bin) steht zentral in der hugocms.ini, nicht hier.
 
 [hugo]
-source = "/media/worker/extra/solar-spar.de"
-destination = "/media/worker/extra/solar-spar.de/public"
+source = "/home/work/Projekte/inter-data_ab_29_10_26"
+destination = "/home/work/Projekte/inter-data_ab_29_10_26/public"
 
 [license]
 key = "HUGOCMS-eyJsaWNlbnNlZSI6IkF1dG9wcm9maXMiLCJkb21haW4iOiIxMjcuMC4wLjEiLCJpc3N1ZWRfYXQiOiIyMDI2LTA2LTI2VDEzOjI4OjQ4WiJ9-daf9e001c74983873fcb12bbefcb576cdc8474486833ede16ac32d43339136e4817d7c27ad00ca6c8c814d04d333b8924293f6bc0b0a8eb874d2a48cdb5f2708"
@@ -86,15 +86,15 @@ tag_label = "Ausgabe"
 [shop]
 enabled = "true"
 online_shop = "true"
-key_hash = "sha256:850f1672f5c0db54df8dd33bc48aeefe695d732a87aa0ed65231a6ec21d7368b"
-key_hint = "6fb6"
-key_created = "2026-11-12T13:12:00+00:00"
+key_hash = "sha256:38f0c2b8ded7dc2226c6ab6bf754747ff9dd84aa89cd6f94bae955f7ff178452"
+key_hint = "11d0"
+key_created = "2026-11-12T14:50:36+00:00"
 signing_key = "fbL02UYClCRI68kJdEpFIs6K/VBBPvPYyTA26rjr1oE="
 content_dir = "content/shop/produkt"
 category_groups = "data/category_groups.json"
-images = "products_images"
-thumbnails = "thumbnails"
-downloads = "downloads"
+images = "static/images/shop/products"
+thumbnails = "static/images/shop/thumbnails"
+downloads = "static/downloads"
 
 [images]
 upload_format = "avif"
