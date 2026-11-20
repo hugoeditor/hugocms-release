@@ -1,9 +1,19 @@
 <?php
+/*
+ * HugoCMS Pro — dieser Bestandteil steht NICHT unter der AGPL.
+ * Nutzung nur mit gültigem Pro-Schlüssel gemäß LICENSE-PRO im Wurzelverzeichnis.
+ * SPDX-License-Identifier: LicenseRef-HugoCMS-Pro
+ */
 
 declare(strict_types=1);
 
-namespace HugoCMS\FileManager\Auth;
+namespace HugoCMS\FileManager\Pro\Auth;
 
+use HugoCMS\FileManager\Auth\AuthInterface;
+use HugoCMS\FileManager\Auth\FileTypeAwareInterface;
+use HugoCMS\FileManager\Auth\SessionHandling;
+use HugoCMS\FileManager\Auth\SiteAwareInterface;
+use HugoCMS\FileManager\Auth\UserAdminInterface;
 use HugoCMS\FileManager\Exception\ApiException;
 
 /**

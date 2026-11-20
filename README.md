@@ -286,6 +286,16 @@ gar nicht erst braucht.
 | **Veröffentlichen-Knopf fehlt** | Hugo ist nicht eingerichtet — Skript erneut ausführen oder Hugo-Pfad im Zahnrad prüfen. |
 | **Alte Oberfläche nach Update** | `bin/update.sh` ausführen und Browser-Zwischenspeicher leeren. |
 
+## Lizenz
+
+HugoCMS besteht aus zwei Teilen: Der Kern ist freie Software unter der **GNU
+Affero General Public License v3** oder später. Die **Pro-Bestandteile**
+(`backend/core/Pro/` und der Client-Chunk `app/assets/pro-*.js`) stehen unter
+der **HugoCMS Pro-Lizenz**; ihr produktiver Einsatz setzt einen Pro-Schlüssel
+voraus. Beide Texte liegen bei (`LICENSE`, `LICENSE-PRO`), die Lizenzen der
+mitgelieferten Komponenten Dritter in `THIRD_PARTY_LICENSES.md`. Eine
+kommerzielle Lizenz ohne die Bedingungen der AGPL gibt es auf Anfrage.
+
 ---
 
 **Quellcode & Entwicklung:** [hugoeditor/hugocms](https://github.com/hugoeditor/hugocms) · **Angetrieben von:** [Hugo](https://gohugo.io)

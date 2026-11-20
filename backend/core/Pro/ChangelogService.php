@@ -1,10 +1,19 @@
 <?php
+/*
+ * HugoCMS Pro — dieser Bestandteil steht NICHT unter der AGPL.
+ * Nutzung nur mit gültigem Pro-Schlüssel gemäß LICENSE-PRO im Wurzelverzeichnis.
+ * SPDX-License-Identifier: LicenseRef-HugoCMS-Pro
+ */
 
 declare(strict_types=1);
 
-namespace HugoCMS\FileManager;
+namespace HugoCMS\FileManager\Pro;
 
 use HugoCMS\FileManager\Exception\ApiException;
+use HugoCMS\FileManager\FileService;
+use HugoCMS\FileManager\Logger;
+use HugoCMS\FileManager\MountConfig;
+use HugoCMS\FileManager\MountResolver;
 use Throwable;
 
 /**
@@ -41,7 +50,7 @@ final class ChangelogService
     public const string MOUNT = 'content';
 
     /** Zielpfad, solange keiner konfiguriert ist: Wurzel des Content-Mounts. */
-    public const string DEFAULT_FILE = 'changelog.md';
+    public const string DEFAULT_FILE = MountConfig::GIT_CHANGELOG_PATH_DEFAULT;
 
     /**
      * Schlüssel im Front Matter neu angelegter Seiten. Hugo führt Seiten mit

@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace HugoCMS\FileManager\Audit;
+namespace HugoCMS\FileManager;
 
 /**
  * Rückabgleich einer gebauten Seite auf ihre Hugo-Quelldatei — best effort.
@@ -13,13 +13,29 @@ namespace HugoCMS\FileManager\Audit;
  * Klasse rät deshalb in zwei Stufen: erst die direkten Kandidaten, dann ein
  * unscharfer Abgleich über den normalisierten Dateinamen im Sektionsverzeichnis.
  *
- * Herausgelöst aus dem {@see AuditRunner}, damit die Hyperlink-Suche
- * ({@see \HugoCMS\FileManager\LinkScanner}) zu einer Fundstelle im gebauten
+ * Herausgelöst aus dem {@see \HugoCMS\FileManager\Pro\Audit\AuditRunner}, damit die Hyperlink-Suche
+ * ({@see LinkScanner}) zu einer Fundstelle im gebauten
  * Ordner dieselbe Quelldatei anbietet wie ein SEO-Fund — eine Logik, ein
  * Ergebnis.
  */
 final class SourceGuesser
 {
+    /**
+     * Papierkorb eines Mounts (siehe FileService::trash). Ein Mount darf überall
+     * liegen — auch unterhalb von public/ oder auf static/, dessen Inhalt Hugo
+     * unverändert nach public/ kopiert. Der Name wird deshalb als PFADSEGMENT in
+     * beliebiger Tiefe ausgeschlossen, nicht als Präfix (siehe inTrash). Liegt
+     * hier im Kern, weil SEO-Check (Pro) und Hyperlink-Suche dieselbe Regel brauchen.
+     */
+    private const string TRASH_DIR = '.trash';
+
+    /** Liegt der relative Pfad (unter public/) in einem Papierkorb? */
+    public static function inTrash(string $rel): bool
+    {
+        return str_starts_with($rel, self::TRASH_DIR . '/')
+            || str_contains($rel, '/' . self::TRASH_DIR . '/');
+    }
+
     /**
      * Cache je Content-Verzeichnis: normalisierter Dateiname → Quellpfad.
      *
